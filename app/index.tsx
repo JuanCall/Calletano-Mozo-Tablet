@@ -1,64 +1,38 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View, Text, TextInput, ScrollView,
-  StyleSheet, Alert, Modal, Platform,
-  StatusBar as RNStatusBar, Dimensions, Animated, KeyboardAvoidingView, BackHandler, RefreshControl, Pressable, PanResponder
+  Modal, Platform,
+  KeyboardAvoidingView, BackHandler, RefreshControl, Pressable, PanResponder, useWindowDimensions
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { io } from 'socket.io-client';
-import axios from 'axios';
-import { collection, doc, getDoc, getDocs, setDoc, addDoc, query, where, Timestamp, deleteDoc, orderBy, limit } from 'firebase/firestore';
-import { signInWithEmailAndPassword } from 'firebase/auth';
-import { db, auth } from './_firebase-config';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 
-const { width: SW } = Dimensions.get('window');
+// 🟢 TUS IMPORTACIONES MODULARES
+import { C, s, CAT } from '../src/styles/theme';
+import { obtenerFechaActualLocal, formatMesaName, modLabelText, obtenerHistorialCambios } from '../src/utils/helpers';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import useAppSystem from '../src/hooks/useAppSystem';
+import useAdmin from '../src/hooks/useAdmin';
+import useMozo from '../src/hooks/useMozo';
+import useClub, { CONSUMO_MINIMO } from '../src/hooks/useClub';
+import useClubAdmin from '../src/hooks/useClubAdmin';
+import { calcularProgreso, enmascararDocumento } from '../src/utils/club';
 
-// ── Paleta Corporativa ERP ─────────────────────
-const C = {
-  bg:          '#F4F1ED',
-  surface:     '#FFFFFF',
-  primary:     '#120B06',
-  primarySoft: 'rgba(18, 11, 6, 0.05)',
-  gold:        '#D4A843',
-  goldSoft:    'rgba(212, 168, 67, 0.12)',
-  danger:      '#D7263D',
-  dangerSoft:  '#FDE8E8',
-  success:     '#10B981',
-  successSoft: 'rgba(16, 185, 129, 0.12)',
-  textDark:    '#2D241E',
-  textMuted:   '#8A7060',
-  border:      '#E5E0D8',
-  borderFocus: '#D1C9C0',
-  overlay:     'rgba(18, 11, 6, 0.7)',
-  white:       '#FFFFFF',
-};
-
-// ─── COMPONENTES PUROS EXTRAÍDOS (Solución a anidación) ───
-const ModIcon = ({ mod, color }) => {
+// ─── COMPONENTES PUROS EXTRAÍDOS ───
+const ModIcon = ({ mod, color }: { mod: string, color: string }) => {
   if (mod === 'local') return <MaterialCommunityIcons name="silverware-fork-knife" size={16} color={color} />;
   if (mod === 'llevar') return <Feather name="shopping-bag" size={16} color={color} />;
   return <MaterialCommunityIcons name="motorbike" size={18} color={color} />;
 };
 
-const modLabelText = (mod) => {
-  if (mod === 'local') return 'Local';
-  if (mod === 'llevar') return 'Llevar';
-  if (mod === 'delivery') return 'Delivery';
-  if (mod === 'delivery_centro') return 'Centro';
-  return mod;
-};
-
-const generarId = () => Math.random().toString(36).substring(2, 10);
-
-// ─── REMPLAZO MODERNO DE TOUCHABLE OPACITY ───
-const Touchable = ({ style, activeOpacity = 0.7, children, disabled, onPress, hitSlop }) => (
+const Touchable = ({ style, activeOpacity = 0.7, children, disabled, onPress, hitSlop, accessibilityLabel, accessibilityRole }: any) => (
   <Pressable
     onPress={onPress}
     disabled={disabled}
     hitSlop={hitSlop}
+    accessibilityLabel={accessibilityLabel}
+    accessibilityRole={accessibilityRole}
     style={({ pressed }) => {
       const baseStyle = typeof style === 'function' ? style({ pressed }) : style;
       return [baseStyle, { opacity: pressed && !disabled ? activeOpacity : (disabled ? 0.5 : 1) }];
@@ -69,48 +43,52 @@ const Touchable = ({ style, activeOpacity = 0.7, children, disabled, onPress, hi
 );
 
 export default function App() {
-  // ─── ESTADOS AGRUPADOS (Solución a 32 useStates) ───
-  const [sys, setSys] = useState({ ipServidor: '', ipInput: '', modoConfig: true, serverStatus: 'Sin conexión', conectado: false });
-  const [authData, setAuthData] = useState({ usuarioActivo: null, username: '', password: '', error: '' });
-  
-  // Estado general de datos sincronizados
-  const [appData, setAppData] = useState({
-    mesas: [], carta: [], modoDomingo: false, estadoRestaurante: {apertura: 12, cierre: 22, cierreForzado: ''}
+
+  // 🟢 1. Cerebro principal (Red, Sockets y Login)
+  const { sys, setSys, authData, setAuthData, appData, setAppData, guardarIP, handleLogin, toggleEstadoLocal,
+    loginRole, setLoginRole, handleMozoLogin
+  } = useAppSystem(() => {
+    cargarReporteDueño();
+    cargarRadarTributario(undefined, true); // 🟢 Cargar radar TAMBIÉN al entrar como admin
   });
 
-  // Estado del mozo
-  const [mozo, setMozo] = useState({ vistaActual: 'mesas', mesaActiva: null, filtroCarta: '' });
-  const [carrito, setCarrito] = useState([]);
-  const [cartVisible, setCartVisible] = useState(false);
-  const [uiSplit, setUiSplit] = useState({ visible: false, idx: null, nextMod: '', cantidadTotal: 0, cantidadMover: 1 });
-  
-  // Modales
-  const [ui, setUi] = useState({
-    modalNota: false, notaInput: '', itemEditando: null, notaCantidadMover: 1,
-    modalFueraCarta: false, fueraCartaItem: { id: '', nombre: '', precio: '' },
-    modalDelivery: false, datosDelivery: { nombre: '', direccion: '', telefono: '', idx: null, mod: '' }
-  });
+  // 🟢 2. Lógica del Dueño / Administrador
+  const { 
+    admin, setAdmin, cargarReporteDueño, cargarRadarTributario, navegarMes, eliminarGastoAdmin, guardarGastoAdmin, onRefreshAdmin,
+    abrirEditorMenu, guardarAdminMenu, updateAdminMenu, toggleDomingoAdmin, updateMenuArr, toggleTaperMenu,
+    addMenuRow, delMenuRow, marcarImpuestoPagado, addDefaultDomingoPlato, PLATOS_DEFAULT_DOMINGO, aplicarGuarnicionGlobal,
+    abrirContacto, guardarContacto
+  } = useAdmin(appData, setAppData, sys.ipServidor);
 
-  // Estado Admin
-  const [admin, setAdmin] = useState({
-    reporte: null, gastos: [], refreshing: false,
-    modalMenu: false, menuData: { titulo: '', modoDomingo: false, entradas: [], segundos: [], refresco: '' },
-    guarnicionGlobal: '',
-    modalGasto: false, gastoData: { descripcion: '', monto: '', categoria: 'Insumos' }
-  });
+  // 🟢 3. Lógica del Mozo / Comandera
+  const { 
+    mozo, setMozo, carrito, cartVisible, setCartVisible,
+    uiSplit, setUiSplit, ui, setUi, totalItems,
+    abrirMesa, agregarAlCarrito, modificarCantidad, calcularRecargoTaperMozo,
+    ciclarModalidad, confirmarSplit, confirmarDatosDelivery, guardarPlatoFueraCarta,
+    guardarNota, enviarComanda, asignarBebidasAlmuerzos, removerBebidaAsignada
+  } = useMozo(sys.ipServidor, appData);
 
-  const socketRef = useRef(null);
+  // 🎫 Club Calletano — escáner de visitas de clientes
+  const club = useClub(sys.ipServidor);
+  // 🎫 Club Calletano — panel de socios (solo Dueño)
+  const clubAdmin = useClubAdmin(sys.ipServidor);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const clubProg = club.miembro ? calcularProgreso(club.miembro.visitas, club.meta) : null;
+  // 💵 La visita solo se registra si el mozo confirma consumo de comida >= S/ 80
+  const consumoOk = parseFloat(club.consumoMesa) >= CONSUMO_MINIMO;
 
-  const obtenerFechaActualLocal = () => {
-    const tzOffset = new Date().getTimezoneOffset() * 60000;
-    return new Date(Date.now() - tzOffset).toISOString().split('T')[0];
-  };
-
-  useEffect(() => {
-    AsyncStorage.getItem('pos_ip').then(ip => {
-      if (ip) setSys(prev => ({ ...prev, ipServidor: ip, ipInput: ip, modoConfig: false }));
-    });
-  }, []);
+  // 🟢 Responsive: dimensiones dinámicas para tablet/rotación
+  const { width: SCREEN_W } = useWindowDimensions();
+  const isTablet = SCREEN_W >= 600;
+  // 🟢 Grid fijo de 3 columnas para simular disposición 3×4
+  const COLS = 3;
+  const GAP = isTablet ? 16 : 12;
+  const PADDING = isTablet ? 24 : 14;
+  // Ancho exacto de cada card; usamos justifyContent:'space-between' para crear el gap
+  const CARD_WIDTH = (SCREEN_W - PADDING * 2 - GAP * (COLS - 1)) / COLS;
+  // 🟢 Catálogo de platos: 2 columnas para mejor legibilidad
+  const PLATO_CARD_WIDTH = (SCREEN_W - PADDING * 2 - GAP) / 2;
 
   useEffect(() => {
     const backAction = () => {
@@ -120,586 +98,74 @@ export default function App() {
       }
       return false; 
     };
-    
-    // 🟢 Asignamos el evento a una variable
     const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
-    
-    // 🟢 Usamos la forma nativa correcta de limpiar en React Native
     return () => backHandler.remove(); 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mozo.vistaActual, authData.usuarioActivo]);
 
-  useEffect(() => {
-    if (!sys.ipServidor || sys.modoConfig) return;
-    const API_URL = `http://${sys.ipServidor}:3001`;
-    setSys(prev => ({ ...prev, serverStatus: 'Conectando...' }));
-    
-    socketRef.current = io(API_URL, { timeout: 4000 });
-
-    const cargarDatos = async () => {
-      try {
-        const [resMesas, resCarta, resDom] = await Promise.all([
-          axios.get(`${API_URL}/api/mesas`, { timeout: 4000 }),
-          axios.get(`${API_URL}/api/carta`, { timeout: 4000 }),
-          axios.get(`${API_URL}/api/modo-domingo`, { timeout: 4000 })
-        ]);
-        
-        // 🟢 Solución a "Cascading SetState" agrupando en un solo setter
-        setAppData({
-          mesas: resMesas.data,
-          carta: resCarta.data,
-          modoDomingo: resDom.data.modoDomingo,
-          estadoRestaurante: resDom.data.estadoRestaurante || {apertura: 12, cierre: 22, cierreForzado: ''}
-        });
-        setSys(prev => ({ ...prev, serverStatus: 'Conectado', conectado: true }));
-      } catch {
-        setSys(prev => ({ ...prev, serverStatus: 'Error · Revisa IP', conectado: false }));
-      }
-    };
-
-    socketRef.current.on('connect', cargarDatos);
-    socketRef.current.on('disconnect', () => setSys(prev => ({ ...prev, serverStatus: 'Desconectado', conectado: false })));
-    socketRef.current.on('connect_error', () => { if (appData.mesas.length === 0) cargarDatos(); });
-    socketRef.current.on('actualizar_mesas', cargarDatos);
-    socketRef.current.on('cambio_estado_restaurante', (estado) => {
-      setAppData(prev => ({ ...prev, estadoRestaurante: estado }));
-      if (authData.usuarioActivo?.rol === 'admin') cargarReporteDueño();
-    });
-
-    return () => { 
-      if (socketRef.current) {
-        socketRef.current.off('connect');
-        socketRef.current.off('disconnect');
-        socketRef.current.off('connect_error');
-        socketRef.current.off('actualizar_mesas');
-        socketRef.current.off('cambio_estado_restaurante');
-        socketRef.current.disconnect(); 
-      }
-    };
-  }, [sys.ipServidor, sys.modoConfig, authData.usuarioActivo]);
-
-  // 🟢 DETECTOR DE ARRASTRE HACIA ABAJO (TELÓN)
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderRelease: (e, gestureState) => {
-        // Si el mozo desliza el dedo hacia abajo más de 50 píxeles, cerramos el telón
         if (gestureState.dy > 50) setCartVisible(false);
       }
     })
   ).current;
-
-  // ─── FUNCIONES GENERALES ───
-  const guardarIP = async () => {
-    const ipLimpia = sys.ipInput.trim();
-    if (!ipLimpia) return Alert.alert('Error', 'Ingresa una IP válida');
-    await AsyncStorage.setItem('pos_ip', ipLimpia);
-    setSys(prev => ({ ...prev, ipServidor: ipLimpia, modoConfig: false }));
-  };
-
-  const handleLogin = async () => {
-    setAuthData(prev => ({ ...prev, error: '' }));
-    try {
-      // 1. INTENTO LOCAL (Busca la Caja por Wi-Fi)
-      const res = await axios.post(`http://${sys.ipServidor}:3001/api/login`, { 
-        username: authData.username, 
-        password: authData.password 
-      }, { timeout: 3000 });
-      
-      setAuthData(prev => ({ ...prev, usuarioActivo: res.data.user }));
-      if (res.data.user.rol === 'admin') cargarReporteDueño();
-      
-    } catch (e) {
-      // 2. ¿QUIÉN INTENTA ENTRAR?
-      const usuarioEsAdmin = authData.username.toLowerCase() === 'admin' || authData.username.toLowerCase() === 'calletano';
-      
-      if (usuarioEsAdmin) {
-        // ES EL DUEÑO: Intentamos por la Nube (Firebase)
-        try {
-          const correoRealAdmin = 'admin@calletano.com'; 
-          await signInWithEmailAndPassword(auth, correoRealAdmin, authData.password);
-          
-          setAuthData(prev => ({ ...prev, usuarioActivo: { username: 'calletano', rol: 'admin' } }));
-          
-          const confSnap = await getDoc(doc(db, 'contenido', 'configuracion'));
-          if (confSnap.exists()) setAppData(prev => ({ ...prev, estadoRestaurante: confSnap.data() }));
-          
-          cargarReporteDueño();
-          if (socketRef.current) socketRef.current.disconnect();
-          setSys(prev => ({ ...prev, serverStatus: 'Modo remoto ☁️', conectado: true }));
-          Alert.alert('Modo Remoto Activado ☁️', 'Conectado a Firebase de forma segura.');
-
-        } catch (errorFirebase) {
-          if (errorFirebase.code === 'auth/network-request-failed') setAuthData(prev => ({ ...prev, error: 'Sin conexión a internet.' }));
-          else if (errorFirebase.code === 'auth/wrong-password' || errorFirebase.code === 'auth/user-not-found' || errorFirebase.code === 'auth/invalid-credential') setAuthData(prev => ({ ...prev, error: 'Usuario o contraseña incorrectos en la nube.' }));
-          else setAuthData(prev => ({ ...prev, error: 'Error al conectar con la Nube.' }));
-        }
-      } else {
-        // ES EL MOZO: Falló la red local, le mostramos el error real
-        setAuthData(prev => ({ ...prev, error: 'No se encuentra la Caja. Revisa el Wi-Fi o la IP.' }));
-      }
-    }
-  };
 
   const cerrarSesion = () => {
     setAuthData(prev => ({ ...prev, usuarioActivo: null, username: '', password: '' }));
     setMozo(prev => ({ ...prev, vistaActual: 'mesas' }));
   };
 
-  // ─── FUNCIONES DEL DUEÑO ───
-  const cargarReporteDueño = async () => {
-    try {
-      // 🟢 1. Fechas nativas exactas
-      const inicioDia = new Date();
-      inicioDia.setHours(0, 0, 0, 0);
-
-      const finDia = new Date();
-      finDia.setHours(23, 59, 59, 999);
-
-      const qVentas = query(collection(db, 'ventas_historicas'), 
-          where('fecha', '>=', Timestamp.fromDate(inicioDia)),
-          where('fecha', '<=', Timestamp.fromDate(finDia))
-      );
-      const ventasSnap = await getDocs(qVentas);
-      
-      const qGastos = query(collection(db, 'gastos'), 
-          where('fecha', '>=', Timestamp.fromDate(inicioDia)),
-          where('fecha', '<=', Timestamp.fromDate(finDia))
-      );
-      const gastosSnap = await getDocs(qGastos);
-
-      let totalV = 0; ventasSnap.forEach(d => { totalV += d.data().total_cobrado || 0; });
-      
-      let totalG = 0; 
-      let listaG = [];
-      
-      gastosSnap.forEach(docSnap => { 
-        const d = docSnap.data();
-        totalG += d.monto || 0; 
-        listaG.push({ id: docSnap.id, ...d });
-      });
-
-      // 🟢 2. Ordenamos los gastos del más nuevo al más viejo localmente
-      listaG.sort((a, b) => b.fecha.seconds - a.fecha.seconds);
-
-      setAdmin(prev => ({ 
-        ...prev, 
-        gastos: listaG, 
-        reporte: { totales: { totalVentas: totalV, totalGastos: totalG, balance: totalV - totalG } } 
-      }));
-    } catch (e) { 
-      console.log("Error cargando reporte remoto", e); 
-    }
-  };
-
-  const eliminarGastoAdmin = (idGasto) => {
-    // 🟢 Soporte para pruebas en Navegador Web
-    if (Platform.OS === 'web') {
-      if (window.confirm('¿Eliminar este registro permanentemente?')) {
-        deleteDoc(doc(db, 'gastos', idGasto)).then(() => {
-          Alert.alert('Éxito', 'Gasto eliminado.');
-          cargarReporteDueño();
-        }).catch(() => {});
-      }
-      return;
-    }
-    
-    // 🟢 Soporte para Celulares Nativos (Android/iOS)
-    Alert.alert('Anular Gasto', '¿Eliminar este registro permanentemente?', [
-      { text: 'Cancelar', style: 'cancel' },
-      { text: 'ELIMINAR', style: 'destructive', onPress: async () => {
-        try {
-          await deleteDoc(doc(db, 'gastos', idGasto));
-          Alert.alert('Éxito', 'Gasto eliminado.');
-          cargarReporteDueño(); 
-        } catch (e) {}
-      }}
-    ]);
-  };
-
-  const guardarGastoAdmin = async () => {
-    if (!admin.gastoData.descripcion || !admin.gastoData.monto) return Alert.alert('Aviso', 'Ingresa un concepto y un monto.');
-    try {
-      const qUltimo = query(collection(db, 'gastos'), orderBy('fecha', 'desc'), limit(1));
-      const snapUltimo = await getDocs(qUltimo);
-      let nextIdNum = 1;
-      
-      // 🟢 Extracción segura del número para el nuevo formato
-      if (!snapUltimo.empty) {
-         const lastDocId = snapUltimo.docs[0].id;
-         if (lastDocId.startsWith('GAS-')) {
-             nextIdNum = parseInt(lastDocId.replace('GAS-', '').split('-')[0], 10) + 1;
-         }
-      }
-      
-      // 🟢 NUEVO FORMATO DE ID: GAS-00000-AAAAMMDD
-      const fechaLimpia = obtenerFechaActualLocal().replace(/-/g, '');
-      const idFirestore = `GAS-${String(nextIdNum).padStart(5, '0')}-${fechaLimpia}`;
-      
-      await setDoc(doc(db, 'gastos', idFirestore), {
-         categoria: admin.gastoData.categoria || 'Otros',
-         concepto: admin.gastoData.descripcion,
-         monto: parseFloat(admin.gastoData.monto),
-         fecha: Timestamp.fromDate(new Date())
-      });
-      
-      setAdmin(prev => ({ ...prev, gastoData: { descripcion: '', monto: '', categoria: 'Insumos' }, modalGasto: false }));
-      Alert.alert('Éxito', `Gasto registrado en la Nube ☁️`);
-      cargarReporteDueño(); 
-    } catch (e) { Alert.alert('Error', `No se pudo registrar: ${e.message}`); }
-  };
-
-  const onRefreshAdmin = async () => {
-    setAdmin(prev => ({ ...prev, refreshing: true }));
-    await cargarReporteDueño();
-    setAdmin(prev => ({ ...prev, refreshing: false }));
-  };
-
-  const toggleEstadoLocal = async () => {
-    const hoy = obtenerFechaActualLocal();
-    const estaCerrado = appData.estadoRestaurante.cierreForzado === hoy;
-    const nuevoEstado = { ...appData.estadoRestaurante, cierreForzado: estaCerrado ? '' : hoy };
-    try {
-      await setDoc(doc(db, 'contenido', 'configuracion'), nuevoEstado, { merge: true });
-      setAppData(prev => ({ ...prev, estadoRestaurante: nuevoEstado }));
-      Alert.alert('Éxito', estaCerrado ? 'Restaurante ABIERTO' : 'Restaurante CERRADO');
-    } catch(e) { Alert.alert('Error', 'No se pudo cambiar el estado en la nube'); }
-  };
-
-  const abrirEditorMenu = async () => {
-    try {
-      const snap = await getDoc(doc(db, 'contenido', 'menuDiario'));
-      if (snap.exists()) setAdmin(prev => ({ ...prev, menuData: snap.data() }));
-      setAdmin(prev => ({ ...prev, modalMenu: true }));
-    } catch (e) { Alert.alert('Error', 'No se pudo cargar el menú desde la nube'); }
-  };
-
-  const guardarAdminMenu = async () => {
-    try {
-      const dataLimpia = JSON.parse(JSON.stringify(admin.menuData));
-      await setDoc(doc(db, 'contenido', 'menuDiario'), dataLimpia);
-      setAppData(prev => ({ ...prev, modoDomingo: admin.menuData.modoDomingo }));
-      setAdmin(prev => ({ ...prev, modalMenu: false }));
-      Alert.alert('Éxito', 'Menú actualizado en la Nube ☁️');
-    } catch (e) { Alert.alert('Error', `Detalle técnico: ${e.message}`); }
-  };
-
-  const updateAdminMenu = (updates) => setAdmin(prev => ({ ...prev, menuData: { ...prev.menuData, ...updates } }));
-  const toggleDomingoAdmin = () => {
-    setAdmin(p => {
-      const nuevoEstado = !p.menuData.modoDomingo;
-      
-      // 🟢 BARRIDO AUTOMÁTICO: Actualiza los segundos existentes al cambiar el modo
-      const segundosActualizados = (p.menuData.segundos || []).map(s => ({
-          ...s,
-          precio: nuevoEstado ? "30" : "15",
-          taper: nuevoEstado ? ['grande'] : ['mediano']
-      }));
-
-      return {
-        ...p,
-        menuData: {
-          ...p.menuData,
-          modoDomingo: nuevoEstado,
-          titulo: nuevoEstado ? 'ESPECIALES DE DOMINGO 🍽️' : 'MENU DEL DIA 🍽️',
-          segundos: segundosActualizados
-        }
-      };
-    });
-  };
-  const updateMenuArr = (tipo, idx, campo, valor) => {
-    const arr = [...(admin.menuData[tipo]||[])]; arr[idx][campo] = valor; updateAdminMenu({ [tipo]: arr });
-  };
-  const toggleTaperMenu = (type, idx, taperName) => {
-     setAdmin(p => {
-        const arr = [...p.menuData[type]];
-        const row = { ...arr[idx] }; 
-        let tapersActuales = Array.isArray(row.taper) ? [...row.taper] : (row.taper ? [row.taper] : []);
-        
-        if (tapersActuales.includes(taperName)) {
-            tapersActuales = tapersActuales.filter(t => t !== taperName);
-        } else {
-            tapersActuales.push(taperName);
-        }
-        row.taper = tapersActuales;
-        arr[idx] = row;
-        return { ...p, menuData: { ...p.menuData, [type]: arr } };
-     });
-  };
-
-  const addMenuRow = (tipo) => setAdmin(p => {
-    let precioDefecto = tipo === 'entradas' ? 6 : 15;
-    let tapersDefecto = tipo === 'entradas' ? ['sopa'] : ['mediano'];
-    
-    if (tipo === 'segundos' && p.menuData.modoDomingo) {
-        precioDefecto = 30;
-        tapersDefecto = ['grande'];
-    }
-    
-    const nuevaFila = tipo === 'entradas' 
-        ? { id: generarId(), nombre: '', precio: String(precioDefecto), taper: tapersDefecto, stock: '' } 
-        : { id: generarId(), nombre: '', acomp: '', precio: String(precioDefecto), taper: tapersDefecto, stock: '' };
-        
-    return { ...p, menuData: { ...p.menuData, [tipo]: [...(p.menuData[tipo]||[]), nuevaFila] } };
+  const mesasOrdenadas = appData.mesas.slice()
+    .filter((m: any) => !String(m.id).startsWith('CTA-') && !String(m.id).startsWith('DEL-') && !String(m.id).startsWith('REC-')) // 🟢 FILTRO DE MOZOS
+    .sort((a: any, b: any) => {
+      const numA = parseInt(String(a.id).replace(/\D/g, ''));
+      const numB = parseInt(String(b.id).replace(/\D/g, ''));
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+      return String(a.id).localeCompare(String(b.id));
   });
 
-  const delMenuRow = (tipo, idx) => { const arr = [...admin.menuData[tipo]]; arr.splice(idx, 1); updateAdminMenu({ [tipo]: arr }); };
-
-  const ciclarTaper = (tipo, idx) => {
-     const opciones = ['', 'chico', 'sopa', 'mediano', 'grande'];
-     const item = admin.menuData[tipo][idx];
-     const nextTaper = opciones[(opciones.indexOf(item.taper || '') + 1) % opciones.length];
-     updateMenuArr(tipo, idx, 'taper', nextTaper);
-  };
-  
-  const aplicarGuarnicionGlobal = () => {
-    if (!admin.guarnicionGlobal.trim()) return Alert.alert('Aviso', 'Escribe una guarnición primero.');
-    const nuevosSegundos = (admin.menuData.segundos || []).map(s => ({ ...s, acomp: admin.guarnicionGlobal }));
-    updateAdminMenu({ segundos: nuevosSegundos });
-    setAdmin(prev => ({ ...prev, guarnicionGlobal: '' }));
-  };
-
-  // ─── FUNCIONES DEL MOZO ───
-  const abrirMesa = (mesa) => {
-    setMozo(prev => ({ ...prev, mesaActiva: mesa, filtroCarta: '', vistaActual: 'comandar' }));
-    setCarrito([]);
-  };
-
-  const agregarAlCarrito = (plato, catNombre) => {
-    // 1. Contamos cuántos de este plato ya metió el mozo al carrito
-    const cantEnCarrito = carrito.filter(i => i.nombre === plato.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
-    
-    // 🟢 NUEVO: Candado de Stock
-    if (plato.stock_actual !== null && plato.stock_actual !== undefined && cantEnCarrito >= plato.stock_actual) {
-        return Alert.alert('Stock Agotado', `Solo quedan ${plato.stock_actual} raciones de ${plato.nombre}.`);
-    }
-
-    const index = carrito.findIndex(i => i.nombre === plato.nombre && i.modalidad === 'local' && i.nota === '');
-    if (index > -1) { modificarCantidad(index, 1); }
-    else {
-      setCarrito(prev => [...prev, {
-        id: generarId(), nombre: plato.nombre, precio: plato.precio,
-        cantidad: 1, categoria: catNombre, modalidad: 'local', nota: '', cliente: null,
-        stock_actual: plato.stock_actual !== undefined ? plato.stock_actual : null, 
-        taper: plato.taper || '', 
-        costo_taper: plato.costo_taper || 0 // 🟢 Taper Automático de Receta
-      }]);
-    }
-  };
-
-  const modificarCantidad = (index, cambio) => {
-    setCarrito(prev => {
-      const n = [...prev];
-      const item = n[index];
-
-      // 🟢 NUEVO: Bloqueo de seguridad dentro del carrito
-      if (cambio > 0 && item.stock_actual !== null) {
-         // Verificamos la suma total de ese plato en el carrito actual
-         const cantTotalEnCarrito = n.filter(i => i.nombre === item.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
-         if (cantTotalEnCarrito >= item.stock_actual) {
-            Alert.alert('Stock Agotado', `Límite alcanzado. Solo quedan ${item.stock_actual} raciones.`);
-            return prev; // Cancela el aumento y mantiene el carrito intacto
-         }
-      }
-
-      n[index] = { ...item, cantidad: item.cantidad + cambio };
-      if (n[index].cantidad <= 0) n.splice(index, 1);
-      return n;
-    });
-  };
-
-  // 🟢 NUEVO: Cerebro matemático para reflejar el precio con taper al instante en la App
-  const calcularRecargoTaperMozo = (item) => {
-      if (!item.modalidad || item.modalidad === 'local') return 0; 
-      const cat = item.categoria ? item.categoria.toUpperCase().trim() : ''; 
-      const nom = item.nombre ? item.nombre.toUpperCase().trim() : '';
-      
-      if (['JUGOS NATURALES', 'BEBIDAS HELADAS', 'BEBIDAS CALIENTES', 'CERVEZA', 'BEBIDAS'].includes(cat) || nom.includes('REFRESCO')) return 1; 
-
-      let recargoEnvase = item.costo_taper || 0;
-      if (!item.costo_taper && item.taper) {
-          const tArr = Array.isArray(item.taper) ? item.taper : [item.taper];
-          tArr.forEach(t => {
-              if (t === 'chico' || t === 'sopa') recargoEnvase += 1;
-              if (t === 'mediano' || t === 'grande') recargoEnvase += 2;
-          });
-      } else if (!item.costo_taper && (!item.taper || item.taper.length === 0)) {
-          if (nom.includes('(ENTRADA)') || nom.includes('HUMITA') || nom.includes('ARROZ') || nom.includes('CAMOTE') || nom.includes('YUCA')) recargoEnvase += 1;
-      }
-      
-      let recargoZona = 0;
-      if (item.modalidad === 'delivery') recargoZona = 1;
-      if (item.modalidad === 'delivery_centro') recargoZona = 3;
-      
-      return recargoEnvase + recargoZona; 
-  };
-
-  const ciclarModalidad = (index) => {
-    // 🟢 NUEVO: Bloqueo de tapers manuales
-    if (carrito[index].nombre.toUpperCase().startsWith('TAPER ')) return;
-    const orden = ['local', 'llevar', 'delivery', 'delivery_centro'];
-    const modActual = carrito[index].modalidad;
-    const nextMod = orden[(orden.indexOf(modActual) + 1) % orden.length];
-
-    if (carrito[index].cantidad > 1) {
-       setUiSplit({ visible: true, idx: index, nextMod, cantidadTotal: carrito[index].cantidad, cantidadMover: 1 });
-       return;
-    }
-
-    if ((nextMod === 'delivery' || nextMod === 'delivery_centro') && (modActual !== 'delivery' && modActual !== 'delivery_centro')) {
-      setUi(prev => ({ ...prev, datosDelivery: { nombre: carrito[index].cliente?.nombre || '', direccion: carrito[index].cliente?.direccion || '', telefono: carrito[index].cliente?.telefono || '', idx: index, mod: nextMod }, modalDelivery: true }));
-    } else {
-      setCarrito(prev => {
-        const n = [...prev];
-        const clienteActual = n[index].cliente;
-        n[index] = { ...n[index], modalidad: nextMod, cliente: (nextMod === 'delivery' || nextMod === 'delivery_centro') ? clienteActual : null };
-        return n;
-      });
-    }
-  };
-
-  const confirmarSplit = () => {
-    const { idx, nextMod, cantidadTotal, cantidadMover } = uiSplit;
-    const modActual = carrito[idx].modalidad;
-    let targetIdx = idx;
-    let needDeliveryModal = false;
-
-    setCarrito(prev => {
-      let n = [...prev];
-      const itemOriginal = { ...n[idx] };
-      const matchIdx = n.findIndex((it, i) => i !== idx && it.nombre === itemOriginal.nombre && it.modalidad === nextMod && it.nota === itemOriginal.nota);
-
-      if (cantidadMover === cantidadTotal) {
-        if (matchIdx > -1) {
-          n[matchIdx].cantidad += cantidadMover;
-          targetIdx = matchIdx;
-          n.splice(idx, 1);
-        } else {
-          n[idx].modalidad = nextMod;
-          if (nextMod !== 'delivery' && nextMod !== 'delivery_centro') n[idx].cliente = null;
-        }
+  // 🟢 Ordenar en patrón serpiente 3×4 (1-2-3 / 6-5-4 / 7-8-9 / 12-11-10)
+  const mesasSnakeOrder = (() => {
+    const cols = 3;
+    const result: any[] = [];
+    const rows = Math.ceil(mesasOrdenadas.length / cols);
+    for (let row = 0; row < rows; row++) {
+      const start = row * cols;
+      const end = Math.min(start + cols, mesasOrdenadas.length);
+      const rowItems = mesasOrdenadas.slice(start, end);
+      if (row % 2 === 0) {
+        result.push(...rowItems); // Fila par: izquierda → derecha
       } else {
-        n[idx].cantidad -= cantidadMover;
-        if (matchIdx > -1) {
-          n[matchIdx].cantidad += cantidadMover;
-          targetIdx = matchIdx;
-        } else {
-          const newItem = { ...itemOriginal, id: generarId(), cantidad: cantidadMover, modalidad: nextMod };
-          if (nextMod !== 'delivery' && nextMod !== 'delivery_centro') newItem.cliente = null;
-          n.splice(idx + 1, 0, newItem);
-          targetIdx = idx + 1;
-        }
+        result.push(...rowItems.reverse()); // Fila impar: derecha → izquierda
       }
-
-      if ((nextMod === 'delivery' || nextMod === 'delivery_centro') && (modActual !== 'delivery' && modActual !== 'delivery_centro')) {
-          needDeliveryModal = true;
-      }
-      return n;
-    });
-
-    if (needDeliveryModal) {
-        setTimeout(() => {
-            setUi(u => ({ ...u, datosDelivery: { nombre: '', direccion: '', telefono: '', idx: targetIdx, mod: nextMod }, modalDelivery: true }));
-        }, 50);
     }
+    return result;
+  })();
 
-    setUiSplit({ visible: false, idx: null, nextMod: '', cantidadTotal: 0, cantidadMover: 1 });
-  };
-
-  const confirmarDatosDelivery = () => {
-    if (!ui.datosDelivery.nombre || !ui.datosDelivery.direccion) return Alert.alert('Faltan datos', 'El nombre y dirección son obligatorios.');
-    setCarrito(prev => {
-      const n = [...prev];
-      n[ui.datosDelivery.idx] = { 
-        ...n[ui.datosDelivery.idx], 
-        modalidad: ui.datosDelivery.mod,
-        cliente: { nombre: ui.datosDelivery.nombre, direccion: ui.datosDelivery.direccion, telefono: ui.datosDelivery.telefono }
-      };
-      return n;
-    });
-    setUi(prev => ({ ...prev, modalDelivery: false }));
-  };
-
-  const guardarPlatoFueraCarta = () => {
-    const p = parseFloat(ui.fueraCartaItem.precio);
-    if (!ui.fueraCartaItem.nombre || isNaN(p)) return Alert.alert('Error', 'Ingrese nombre y precio válido.');
-    setCarrito(prev => [...prev, { 
-      id: generarId(), nombre: `${ui.fueraCartaItem.nombre} (Extra)`, 
-      precio: p, cantidad: 1, categoria: 'GENERAL', modalidad: 'local', nota: '' 
-    }]);
-    setUi(prev => ({ ...prev, fueraCartaItem: { id: '', nombre: '', precio: '' }, modalFueraCarta: false }));
-  };
-
-  const guardarNota = () => {
-    if (ui.itemEditando !== null) {
-      const idx = ui.itemEditando;
-      const textoNota = ui.notaInput.toUpperCase().trim();
-      const cantidadMover = ui.notaCantidadMover;
-      
-      setCarrito(prev => {
-        let n = [...prev];
-        const itemOriginal = n[idx];
-        const cantidadTotal = itemOriginal.cantidad;
-
-        if (cantidadMover === cantidadTotal) {
-          // Se aplica a todo el grupo
-          n[idx] = { ...itemOriginal, nota: textoNota };
-        } else {
-          // Se rompe el grupo: restamos cantidad al renglón base
-          n[idx] = { ...itemOriginal, cantidad: cantidadTotal - cantidadMover };
-          
-          // Creamos una nueva entidad en el carrito con su propia ID y nota
-          const newItem = { ...itemOriginal, id: generarId(), cantidad: cantidadMover, nota: textoNota };
-          n.splice(idx + 1, 0, newItem);
-        }
-
-        // Auto-Merge en caliente: Si el mozo fracciona y le pone una nota idéntica a algo que ya existía, se fusionan
-        let agrupado = [];
-        n.forEach(it => {
-          let idxMatch = agrupado.findIndex(f => f.nombre === it.nombre && f.modalidad === it.modalidad && (f.nota || '') === (it.nota || ''));
-          if (idxMatch > -1) {
-            agrupado[idxMatch].cantidad += it.cantidad;
-          } else {
-            agrupado.push(it);
-          }
-        });
-        return agrupado;
-      });
-    }
-    setUi(prev => ({ ...prev, modalNota: false }));
-  };
-
-  const enviarComanda = async () => {
-    if (carrito.length === 0) return Alert.alert('Aviso', 'El carrito está vacío');
-    try {
-      await axios.post(`http://${sys.ipServidor}:3001/api/pedidos`, { mesa: mozo.mesaActiva.id, items: carrito });
-      setMozo(prev => ({ ...prev, vistaActual: 'mesas' }));
-      Alert.alert('✅ ¡Enviado!', 'La orden se ha impreso en cocina.');
-    } catch { Alert.alert('Error', '❌ No se pudo enviar la comanda'); }
-  };
-
-  const formatMesaName = (id) => {
-    if (!id) return '';
-    const idStr = String(id).replace('.0', ''); 
-    if (idStr.startsWith('DEL-')) return idStr;
-    return `MESA ${idStr.replace('mesa_', '')}`;
-  };
-
-  const mesasOrdenadas = appData.mesas.slice().sort((a, b) => {
-    const numA = parseInt(String(a.id).replace(/\D/g, ''));
-    const numB = parseInt(String(b.id).replace(/\D/g, ''));
-    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-    return String(a.id).localeCompare(String(b.id));
-  });
-
-  const totalItems = carrito.reduce((s, i) => s + i.cantidad, 0);
+  const insets = useSafeAreaInsets();
   const elRestauranteEstaCerrado = appData.estadoRestaurante.cierreForzado === obtenerFechaActualLocal();
 
-  // ═══════════════════════════════════════════════════════════
-  // SINGLE RETURN ARQUITECTURE (Solución a Rerender issues)
-  // ═══════════════════════════════════════════════════════════
+  // 🟢 Obtener configuración visual de una categoría
+  const getCatConf = (nombre: string) => {
+    const n = nombre.toLowerCase().trim();
+    if (n === 'entradas') return CAT.entradas;
+    if (n === 'segundos') return CAT.segundos;
+    if (n === 'bebidas' || n.startsWith('bebida')) return CAT.bebidas;
+    return CAT.otro;
+  };
+
+  // 🟢 Formatear YYYY-MM a "MES AÑO" (ej: "JULIO 2026")
+  const formatMes = (ym: string) => {
+    const [y, m] = ym.split('-');
+    const meses = ['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO','JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
+    return `${meses[parseInt(m)-1]} ${y}`;
+  };
+
   return (
-    <View style={s.safeAreaBlue}>
-      <StatusBar style="light" />
+    <SafeAreaView edges={['top']} style={s.safeAreaBlue}>
+      <StatusBar style="light" hidden={true} />
       
       {/* ─── PANTALLA 1: CONFIGURAR IP ─── */}
       {sys.modoConfig && (
@@ -718,7 +184,7 @@ export default function App() {
         </View>
       )}
 
-      {/* ─── PANTALLA 2: LOGIN ─── */}
+      {/* ─── PANTALLA 2: LOGIN CON SELECCIÓN DE ROL ─── */}
       {!sys.modoConfig && !authData.usuarioActivo && (
         <View style={s.cfgScreen}>
           <View style={s.cfgCard}>
@@ -726,11 +192,56 @@ export default function App() {
               <Text style={s.cfgLogo}>Calletano</Text>
               <Text style={s.cfgLogoSub}>SISTEMA DE CONTROL</Text>
             </View>
-            {authData.error !== '' && <Text style={{color: C.danger, textAlign: 'center', marginBottom: 15, fontWeight: '800', fontSize: 13}}>{authData.error}</Text>}
-            <TextInput style={[s.cfgInput, {textAlign: 'left'}]} placeholder="Usuario" placeholderTextColor={C.textMuted} value={authData.username} onChangeText={t => setAuthData(prev => ({ ...prev, username: t }))} autoCapitalize="none" />
-            <TextInput style={[s.cfgInput, {textAlign: 'left', marginBottom: 25}]} placeholder="Contraseña" placeholderTextColor={C.textMuted} value={authData.password} onChangeText={t => setAuthData(prev => ({ ...prev, password: t }))} secureTextEntry />
-            <Touchable style={s.btnPrimary} onPress={handleLogin}><Text style={s.btnPrimaryText}>Ingresar</Text></Touchable>
-            <Touchable style={{marginTop: 30, alignItems: 'center'}} onPress={() => setSys(prev => ({ ...prev, modoConfig: true }))}><Text style={{color: C.textMuted, fontSize: 12, fontWeight: '800'}}>⚙️ Cambiar IP de Servidor</Text></Touchable>
+            
+            {authData.error !== '' && (
+              <Text style={{color: C.danger, textAlign: 'center', marginBottom: 15, fontWeight: '800', fontSize: 13}}>{authData.error}</Text>
+            )}
+
+            {/* 🆕 SELECCIONADOR DE ROL */}
+            {loginRole === null && (
+              <>
+                <Text style={{fontSize: 11, fontWeight: '700', color: C.textMuted, textAlign: 'center', marginBottom: 24, letterSpacing: 1.5, textTransform: 'uppercase'}}>Acceder como</Text>
+                <Touchable 
+                  style={{backgroundColor: C.surface, borderRadius: 14, padding: 24, marginBottom: 12, borderWidth: 1.5, borderColor: C.gold, alignItems: 'center', boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.06)', elevation: 3}}
+                  onPress={() => { setLoginRole('dueno'); setAuthData(prev => ({...prev, error: ''})); }}
+                >
+                  <View style={{width: 48, height: 48, borderRadius: 24, backgroundColor: C.goldSoft, alignItems: 'center', justifyContent: 'center', marginBottom: 12}}>
+                    <Feather name="user-check" size={24} color={C.gold} />
+                  </View>
+                  <Text style={{fontSize: 17, fontWeight: '700', color: C.textDark, marginBottom: 4, letterSpacing: -0.3}}>Administrador</Text>
+                  <Text style={{fontSize: 12, color: C.textMuted, fontWeight: '500', textAlign: 'center', lineHeight: 18}}>Reportes, control de inventario,{`\n`}gestión del menú y configuración</Text>
+                </Touchable>
+                <Touchable 
+                  style={{backgroundColor: C.surface, borderRadius: 14, padding: 24, marginBottom: 28, borderWidth: 1.5, borderColor: C.borderFocus, alignItems: 'center', boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.06)', elevation: 3}}
+                  onPress={handleMozoLogin}
+                >
+                  <View style={{width: 48, height: 48, borderRadius: 24, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', marginBottom: 12}}>
+                    <Feather name="users" size={24} color={C.textDark} />
+                  </View>
+                  <Text style={{fontSize: 17, fontWeight: '700', color: C.textDark, marginBottom: 4, letterSpacing: -0.3}}>Mozo</Text>
+                  <Text style={{fontSize: 12, color: C.textMuted, fontWeight: '500', textAlign: 'center', lineHeight: 18}}>Tomar pedidos en mesas,{`\n`}enviar comandas a cocina</Text>
+                </Touchable>
+                <Touchable style={{alignItems: 'center', padding: 8}} onPress={() => setSys(prev => ({ ...prev, modoConfig: true }))}>
+                  <Text style={{color: C.textMuted, fontSize: 11, fontWeight: '600', letterSpacing: 0.3}}>Configurar conexión</Text>
+                </Touchable>
+              </>
+            )}
+
+            {/* 🟢 LOGIN DUEÑO */}
+            {loginRole === 'dueno' && (
+              <>
+                <Touchable onPress={() => { setLoginRole(null); setAuthData(prev => ({...prev, error: ''})); }} style={{marginBottom: 16, alignSelf: 'flex-start'}}>
+                  <Text style={{color: C.textMuted, fontSize: 12, fontWeight: '800'}}>← VOLVER</Text>
+                </Touchable>
+                <TextInput style={[s.cfgInput, {textAlign: 'left'}]} placeholder="Usuario" placeholderTextColor={C.textMuted} value={authData.username} onChangeText={t => setAuthData(prev => ({ ...prev, username: t }))} autoCapitalize="none" />
+                <TextInput style={[s.cfgInput, {textAlign: 'left', marginBottom: 25}]} placeholder="Contraseña" placeholderTextColor={C.textMuted} value={authData.password} onChangeText={t => setAuthData(prev => ({ ...prev, password: t }))} secureTextEntry />
+                <Touchable style={s.btnPrimary} onPress={handleLogin}>
+                  <Text style={s.btnPrimaryText}>Ingresar como Dueño</Text>
+                </Touchable>
+              </>
+            )}
+
+            {/* 🟢 LOGIN MOZO (ya no necesita PIN) — se autentica directo al hacer clic */}
           </View>
         </View>
       )}
@@ -741,36 +252,183 @@ export default function App() {
           <View style={s.navbar}>
             <Text style={s.navBrand}>Dueño <Text style={{fontSize: 14, color: C.gold}}>POS</Text></Text>
             <View style={s.navRight}>
-              <View style={[s.statusPill, sys.conectado ? s.statusPillOn : s.statusPillOff]}>
+              <View style={[s.statusPill, { backgroundColor: sys.conectado ? 'rgba(16, 185, 129, 0.08)' : 'rgba(215, 38, 61, 0.08)', borderColor: sys.conectado ? 'rgba(16, 185, 129, 0.3)' : 'rgba(215, 38, 61, 0.3)' }]}>
                 <View style={[s.statusDot, { backgroundColor: sys.conectado ? C.success : C.danger }]} />
                 <Text style={s.statusPillText} numberOfLines={1}>{sys.serverStatus}</Text>
               </View>
-              <Touchable onPress={cerrarSesion} style={s.cfgIconBtn}><Feather name="log-out" size={20} color={C.surface} /></Touchable>
+              <Touchable onPress={club.abrirClub} style={s.cfgIconBtn} accessibilityLabel="Club Calletano" accessibilityRole="button"><Feather name="credit-card" size={20} color={C.surface} /></Touchable>
+              <Touchable onPress={cerrarSesion} style={s.cfgIconBtn} accessibilityLabel="Cerrar sesión" accessibilityRole="button"><Feather name="log-out" size={20} color={C.surface} /></Touchable>
             </View>
           </View>
 
-          <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: 16, paddingBottom: 40 }} contentInsetAdjustmentBehavior="automatic" refreshControl={<RefreshControl refreshing={admin.refreshing} onRefresh={onRefreshAdmin} tintColor={C.gold} />}>
+          <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: PADDING, paddingBottom: 40 }} contentInsetAdjustmentBehavior="automatic" refreshControl={<RefreshControl refreshing={admin.refreshing} onRefresh={onRefreshAdmin} tintColor={C.gold} />}>
             <Text style={s.seccionTitle}>ACCIONES ADMINISTRATIVAS</Text>
-            <View style={{flexDirection: 'row', gap: 12, marginBottom: 24}}>
-               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.gold}]} onPress={abrirEditorMenu}>
-                  <Feather name="edit-3" size={24} color={C.gold} style={{marginBottom: 8}}/>
-                  <Text style={{fontSize: 11, fontWeight: '800', color: C.textDark}}>EDITAR MENÚ</Text>
+            <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 24}}>
+               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.gold, flex: 1, minWidth: 100}]} onPress={abrirEditorMenu}>
+                  <Feather name="edit-3" size={22} color={C.gold} style={{marginBottom: 6}}/>
+                  <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>EDITAR MENÚ</Text>
                </Touchable>
-               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.danger}]} onPress={() => setAdmin(prev => ({ ...prev, modalGasto: true }))}>
-                  <Feather name="dollar-sign" size={24} color={C.danger} style={{marginBottom: 8}}/>
-                  <Text style={{fontSize: 11, fontWeight: '800', color: C.textDark}}>NUEVO GASTO</Text>
+               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.danger, flex: 1, minWidth: 100}]} onPress={() => setAdmin(prev => ({ ...prev, modalGasto: true }))}>
+                  <Feather name="dollar-sign" size={22} color={C.danger} style={{marginBottom: 6}}/>
+                  <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>NUEVO GASTO</Text>
+               </Touchable>
+
+               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.teal, flex: 1, minWidth: 100}]} onPress={abrirContacto}>
+                  <Feather name="phone" size={22} color={C.teal} style={{marginBottom: 6}}/>
+                  <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>CONTACTO</Text>
+               </Touchable>
+
+               {/* 🎫 Club Calletano: lista de socios y canje de premios (solo Dueño) */}
+               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.gold, flex: 1, minWidth: 100}]} onPress={clubAdmin.abrirSocios}>
+                  <Feather name="users" size={22} color={C.gold} style={{marginBottom: 6}}/>
+                  <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>SOCIOS CLUB</Text>
                </Touchable>
             </View>
 
+            {/* 🟢 RADAR TRIBUTARIO PRIVADO DEL DUEÑO */}
+            <Text style={s.seccionTitle}>RADAR TRIBUTARIO SUNAT (S/ 5,000)</Text>
+            
+            {/* 🟢 Navegador de meses */}
+            <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, backgroundColor: C.surface, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: C.border}}>
+              <Touchable onPress={() => navegarMes(-1)} style={{padding: 12, borderRadius: 8, backgroundColor: C.bg}} accessibilityLabel="Mes anterior" accessibilityRole="button">
+                <Feather name="chevron-left" size={22} color={C.primary} />
+              </Touchable>
+              <View style={{alignItems: 'center'}}>
+                <Text style={{fontSize: 16, fontWeight: '800', color: C.textDark, letterSpacing: 0.5}}>
+                  {formatMes(admin.radarMonth)}
+                </Text>
+                <Text style={{fontSize: 12, color: C.textMuted, fontWeight: '600', marginTop: 2}}>
+                  {admin.radarMonth === obtenerFechaActualLocal().slice(0, 7) ? 'MES ACTUAL' : 'HISTÓRICO'}
+                </Text>
+              </View>
+              <Touchable 
+                onPress={() => navegarMes(1)} 
+                style={{padding: 12, borderRadius: 8, backgroundColor: admin.radarMonth === obtenerFechaActualLocal().slice(0, 7) ? C.border : C.bg}}
+                accessibilityLabel="Mes siguiente" accessibilityRole="button">
+                <Feather name="chevron-right" size={22} color={admin.radarMonth === obtenerFechaActualLocal().slice(0, 7) ? C.textMuted : C.primary} />
+              </Touchable>
+            </View>
+
+            <View style={{backgroundColor: C.surface, borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 2, borderColor: C.gold}}>
+               
+               {admin.radarMonth === obtenerFechaActualLocal().slice(0, 7) && new Date().getDate() <= 20 && appData.estadoRestaurante.mesImpuestoPagado !== obtenerFechaActualLocal().slice(0, 7) && (
+                 <View style={{backgroundColor: C.dangerSoft, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: C.danger, marginBottom: 20}}>
+                   <Text style={{color: C.danger, fontWeight: '800', fontSize: 13, textAlign: 'center', marginBottom: 10}}>🚨 ¡HOY TOCA PAGAR LOS S/ 20 A SUNAT!</Text>
+                   <Touchable style={[s.btnPrimary, {backgroundColor: C.danger, padding: 10}]} onPress={marcarImpuestoPagado}>
+                     <Text style={s.btnPrimaryText}>Ya lo pagué ✔️</Text>
+                   </Touchable>
+                 </View>
+               )}
+
+               <Text style={{fontSize: 11, color: C.textMuted, marginBottom: 12, textAlign: 'center'}}>
+                 Acumulado de {formatMes(admin.radarMonth)} — Límite S/ 5,000
+               </Text>
+               {/* Ventas */}
+               <View style={{flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8}}>
+                 <Text style={{fontWeight: '800', color: C.successDark, fontSize: 12}}>VENTAS BOLETA</Text>
+                 <Text style={{fontWeight: '800'}}>S/ {(admin.radarMensual?.ventasSunat || 0).toFixed(2)}</Text>
+               </View>
+               <View style={{height: 10, backgroundColor: C.bg, borderRadius: 5, marginBottom: 20, overflow: 'hidden'}}>
+                 <View style={{height: '100%', backgroundColor: C.success, width: `${Math.min(100, ((admin.radarMensual?.ventasSunat || 0) / 5000) * 100)}%`}} />
+               </View>
+
+               {/* Gastos */}
+               <View style={{flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8}}>
+                 <Text style={{fontWeight: '800', color: C.teal, fontSize: 12}}>COMPRAS FACTURADAS</Text>
+                 <Text style={{fontWeight: '800'}}>S/ {(admin.radarMensual?.gastosSunat || 0).toFixed(2)}</Text>
+               </View>
+               <View style={{height: 10, backgroundColor: C.bg, borderRadius: 5, overflow: 'hidden'}}>
+                 <View style={{height: '100%', backgroundColor: C.teal, width: `${Math.min(100, ((admin.radarMensual?.gastosSunat || 0) / 5000) * 100)}%`}} />
+               </View>
+            </View>
             <Text style={s.seccionTitle}>ARQUEO EN VIVO (HOY)</Text>
             <View style={{backgroundColor: C.surface, borderRadius: 16, padding: 24, marginBottom: 24, borderWidth: 1, borderColor: C.border}}>
               <Text style={{fontSize: 12, fontWeight: '800', color: C.textMuted, letterSpacing: 1, marginBottom: 8}}>INGRESO BRUTO</Text>
-              <Text style={{fontSize: 36, fontWeight: '800', color: C.success, marginBottom: 24}}>S/ {admin.reporte?.totales?.totalVentas?.toFixed(2) || '0.00'}</Text>
+              <Text style={{fontSize: 36, fontWeight: '800', color: C.successDark, marginBottom: 24}}>S/ {admin.reporte?.totales?.totalVentas?.toFixed(2) || '0.00'}</Text>
               <Text style={{fontSize: 12, fontWeight: '800', color: C.textMuted, letterSpacing: 1, marginBottom: 8}}>EGRESOS REGISTRADOS</Text>
               <Text style={{fontSize: 24, fontWeight: '800', color: C.danger, marginBottom: 24}}>S/ {admin.reporte?.totales?.totalGastos?.toFixed(2) || '0.00'}</Text>
               <View style={{height: 1, backgroundColor: C.border, marginVertical: 10, marginBottom: 20}} />
-              <Text style={{fontSize: 12, fontWeight: '800', color: C.gold, letterSpacing: 1, marginBottom: 8}}>GANANCIA NETA OPERATIVA</Text>
+              <Text style={{fontSize: 12, fontWeight: '800', color: C.goldText, letterSpacing: 1, marginBottom: 8}}>GANANCIA NETA OPERATIVA</Text>
               <Text style={{fontSize: 28, fontWeight: '800', color: C.primary}}>S/ {admin.reporte?.totales?.balance?.toFixed(2) || '0.00'}</Text>
+              
+              {/* 🆕 DESGLOSE POR MÉTODO DE PAGO */}
+              {admin.reporte?.pagos && (
+                <>
+                  <View style={{height: 1, backgroundColor: C.border, marginVertical: 20}} />
+                  <Text style={{fontSize: 12, fontWeight: '800', color: C.textMuted, letterSpacing: 1, marginBottom: 16}}>DESGLOSE POR PAGO</Text>                      {[
+                    {label: 'Efectivo', value: admin.reporte.pagos.efectivo, color: C.success},
+                    {label: 'Yape', value: admin.reporte.pagos.yape, color: C.teal},
+                    {label: 'Plin', value: admin.reporte.pagos.plin, color: C.danger},
+                    {label: 'Tarjeta', value: admin.reporte.pagos.tarjeta, color: C.primary}
+                  ].filter(p => p.value > 0).map(p => (
+                    <View key={p.label} style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8}}>
+                      <View style={{flexDirection: 'row', alignItems: 'center', gap: 8}}>
+                        <View style={{width: 10, height: 10, borderRadius: 5, backgroundColor: p.color}} />
+                        <Text style={{fontSize: 12, fontWeight: '600', color: C.textMuted}}>{p.label}</Text>
+                      </View>
+                      <Text style={{fontSize: 13, fontWeight: '800', color: C.textDark}}>S/ {p.value.toFixed(2)}</Text>
+                    </View>
+                  ))}
+                </>
+              )}
+            </View>
+
+            {/* 🟢 BOLETAS SUNAT EMITIDAS HOY */}
+            <Text style={s.seccionTitle}>BOLETAS SUNAT EMITIDAS HOY</Text>
+            <View style={{backgroundColor: C.surface, borderRadius: 16, padding: 20, marginBottom: 24, borderWidth: 1, borderColor: C.gold}}>
+              <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16}}>
+                <View style={{flex: 1}}>
+                  <Text style={{fontSize: 11, fontWeight: '800', color: C.textMuted, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4}}>MONTO DECLARADO</Text>
+                  <Text style={{fontSize: 32, fontWeight: '800', color: C.successDark}}>
+                    S/ {admin.reporte?.totales?.ventasSunatHoy?.toFixed(2) || '0.00'}
+                  </Text>
+                </View>
+                <View style={{alignItems: 'center', backgroundColor: C.successSoft, paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12}}>
+                  <Text style={{fontSize: 28, fontWeight: '800', color: C.successDark}}>
+                    {admin.reporte?.totales?.cantBoletasSunat || 0}
+                  </Text>
+                  <Text style={{fontSize: 12, fontWeight: '800', color: C.successDark, textTransform: 'uppercase', letterSpacing: 0.5}}>Boletas</Text>
+                </View>
+              </View>
+              <View style={{height: 1, backgroundColor: C.border, marginBottom: 12}} />
+              <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
+                <View style={{flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1}}>
+                  <Feather name="info" size={12} color={C.textMuted} />
+                  <Text style={{fontSize: 12, color: C.textMuted, fontWeight: '600', flex: 1}}>
+                    Solo boletas con envío exitoso a SUNAT
+                  </Text>
+                </View>
+                {(admin.reporte?.totales?.cantBoletasSunat || 0) > 0 && (
+                  <Feather name="check-circle" size={20} color={C.success} />
+                )}
+              </View>
+
+              {/* 🆕 Detalle de cada boleta SUNAT (hora, mesa y monto) */}
+              {(admin.reporte?.boletasSunat?.length || 0) > 0 && (
+                <View style={{ marginTop: 14, gap: 8 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: C.textMuted, letterSpacing: 1, textTransform: 'uppercase' }}>
+                    DETALLE DE BOLETAS
+                  </Text>
+                  {(admin.reporte.boletasSunat || []).map((b: any, i: number) => (
+                    <View
+                      key={i}
+                      style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 10, borderWidth: 1, borderColor: C.border }}
+                    >
+                      <View style={{ width: 52 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: C.textDark }}>{b.hora}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: C.primary }} numberOfLines={1}>
+                          {formatMesaName(b.mesa)}
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: C.successDark }}>
+                        S/ {(b.monto || 0).toFixed(2)}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
             </View>
 
             <Text style={s.seccionTitle}>DETALLE DE GASTOS (HOY)</Text>
@@ -785,7 +443,7 @@ export default function App() {
                       <Text style={{fontSize: 11, color: C.textMuted, textTransform: 'uppercase'}}>{g.categoria}</Text>
                     </View>
                     <Text style={{fontSize: 15, fontWeight: '800', color: C.danger, marginRight: 15}}>S/ {g.monto.toFixed(2)}</Text>
-                    <Touchable onPress={() => eliminarGastoAdmin(g.id)} style={{padding: 8}}>
+                    <Touchable onPress={() => eliminarGastoAdmin(g.id)} style={{padding: 8}} accessibilityLabel="Eliminar gasto" accessibilityRole="button">
                       <Feather name="trash-2" size={18} color={C.textMuted} />
                     </Touchable>
                   </View>
@@ -799,8 +457,8 @@ export default function App() {
                <Text style={{fontSize: 18, fontWeight: '800', color: C.textDark, marginBottom: 24}}>
                  El restaurante está {elRestauranteEstaCerrado ? 'CERRADO' : 'ABIERTO'}
                </Text>
-               <Touchable style={[s.btnPrimary, {width: '100%', backgroundColor: elRestauranteEstaCerrado ? C.success : C.danger}]} onPress={toggleEstadoLocal}>
-                 <Text style={s.btnPrimaryText}>{elRestauranteEstaCerrado ? 'ABRIR RESTAURANTE AHORA' : 'CERRAR POR HOY'}</Text>
+               <Touchable style={[s.btnPrimary, {width: '100%', backgroundColor: elRestauranteEstaCerrado ? C.successLight : C.danger}]} onPress={toggleEstadoLocal}>
+                 <Text style={[s.btnPrimaryText, elRestauranteEstaCerrado ? {color: '#064E3B'} : null]}>{elRestauranteEstaCerrado ? 'ABRIR RESTAURANTE AHORA' : 'CERRAR POR HOY'}</Text>
                </Touchable>
             </View>
           </ScrollView>
@@ -822,6 +480,13 @@ export default function App() {
                      </Touchable>
                    ))}
                 </View>
+                <Touchable 
+                   style={{flexDirection: 'row', alignItems: 'center', backgroundColor: admin.gastoData.con_comprobante ? C.successSoft : C.bg, padding: 12, borderRadius: 8, borderWidth: 1, borderColor: admin.gastoData.con_comprobante ? C.success : C.border, marginBottom: 20}} 
+                   onPress={() => setAdmin(prev => ({ ...prev, gastoData: { ...prev.gastoData, con_comprobante: !prev.gastoData.con_comprobante } }))}
+                >
+                   <MaterialCommunityIcons name={admin.gastoData.con_comprobante ? "checkbox-marked" : "checkbox-blank-outline"} size={24} color={admin.gastoData.con_comprobante ? C.success : C.textMuted} />
+                   <Text style={{marginLeft: 10, fontWeight: '800', color: admin.gastoData.con_comprobante ? C.success : C.textDark}}>Tengo Factura/Boleta (SUNAT)</Text>
+                </Touchable>
                 <Touchable style={[s.btnPrimary, {backgroundColor: C.danger}]} onPress={guardarGastoAdmin}><Text style={s.btnPrimaryText}>Guardar Gasto</Text></Touchable>
                 <Touchable style={s.btnSecondary} onPress={() => setAdmin(prev => ({ ...prev, modalGasto: false }))}><Text style={s.btnSecondaryText}>Cancelar</Text></Touchable>
               </View>
@@ -832,9 +497,9 @@ export default function App() {
           <Modal visible={admin.modalMenu} animationType="slide">
             <SafeAreaView style={{flex: 1, backgroundColor: C.bg}}>
               <View style={[s.navbar, {justifyContent: 'space-between'}]}>
-                 <Touchable onPress={() => setAdmin(prev => ({ ...prev, modalMenu: false }))} style={{padding: 10}}><Feather name="x" size={26} color={C.surface} /></Touchable>
+                 <Touchable onPress={() => setAdmin(prev => ({ ...prev, modalMenu: false }))} style={{padding: 10}} accessibilityLabel="Cerrar editor de menú" accessibilityRole="button"><Feather name="x" size={26} color={C.surface} /></Touchable>
                  <Text style={[s.navTitle, {fontSize: 18}]}>Editor de Menú</Text>
-                 <Touchable onPress={guardarAdminMenu} style={{padding: 10}}><Feather name="check" size={26} color={C.surface} /></Touchable>
+                 <Touchable onPress={guardarAdminMenu} style={{padding: 10}} accessibilityLabel="Guardar menú" accessibilityRole="button"><Feather name="check" size={26} color={C.surface} /></Touchable>
               </View>
               <ScrollView contentContainerStyle={{padding: 16}} contentInsetAdjustmentBehavior="automatic">
                  <Text style={s.seccionTitle}>CONFIGURACIÓN GENERAL</Text>
@@ -846,32 +511,32 @@ export default function App() {
                  {!admin.menuData.modoDomingo && (
                    <View style={{backgroundColor: C.surface, padding: 12, borderRadius: 12, marginBottom: 20, borderWidth: 1, borderColor: C.border}}>
                       <View style={{flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16}}>
-                         <Text style={{fontWeight: '800', color: C.gold, fontSize: 16}}>ENTRADAS</Text>
-                         <Touchable onPress={() => addMenuRow('entradas')}><Text style={{color: C.gold, fontWeight: '800', fontSize: 14}}>+ Añadir</Text></Touchable>
+                         <Text style={{fontWeight: '800', color: C.goldText, fontSize: 16}}>ENTRADAS</Text>
+                         <Touchable onPress={() => addMenuRow('entradas')}><Text style={{color: C.goldText, fontWeight: '800', fontSize: 14}}>+ Añadir</Text></Touchable>
                       </View>
-                      {(admin.menuData.entradas||[]).map((e, idx) => (
+                      {(admin.menuData.entradas||[]).map((e: any, idx: number) => (
                         <View key={e.id || `ent-${idx}`} style={{backgroundColor: C.surface, padding: 12, borderRadius: 8, marginBottom: 8, borderWidth: 1, borderColor: C.border}}>
                            <View style={{flexDirection: 'row', gap: 8}}>
                              <TextInput style={[s.modalInputCompact, {flex: 1, marginBottom: 0, paddingVertical: 10}]} placeholder="Nombre de Entrada" value={e.nombre} onChangeText={t => updateMenuArr('entradas', idx, 'nombre', t)} />
                              <View style={{alignItems: 'center'}}>
-                               <Text style={{fontSize: 9, color: C.primary, fontWeight: 'bold', marginBottom: 2}}>PRECIO S/</Text>
+                               <Text style={{fontSize: 12, color: C.primary, fontWeight: 'bold', marginBottom: 2}}>PRECIO S/</Text>
                                <TextInput style={[s.modalInputCompact, {width: 60, marginBottom: 0, paddingVertical: 10, textAlign: 'center'}]} placeholder="S/" value={String(e.precio)} onChangeText={t => updateMenuArr('entradas', idx, 'precio', t)} keyboardType="decimal-pad" />
                              </View>
                              <View style={{alignItems: 'center'}}>
-                               <Text style={{fontSize: 9, color: '#006989', fontWeight: 'bold', marginBottom: 2}}>📦 STOCK</Text>
-                               <TextInput style={[s.modalInputCompact, {width: 60, marginBottom: 0, paddingVertical: 10, textAlign: 'center', borderColor: '#006989', color: '#006989'}]} placeholder="Stock" value={String(e.stock || '')} onChangeText={t => updateMenuArr('entradas', idx, 'stock', t)} keyboardType="number-pad" />
+                               <Text style={{fontSize: 12, color: C.teal, fontWeight: 'bold', marginBottom: 2}}>STOCK</Text>
+                               <TextInput style={[s.modalInputCompact, {width: 60, marginBottom: 0, paddingVertical: 10, textAlign: 'center', borderColor: C.teal, color: C.teal}]} placeholder="Stock" value={String(e.stock || '')} onChangeText={t => updateMenuArr('entradas', idx, 'stock', t)} keyboardType="number-pad" />
                              </View>
-                             <Touchable onPress={() => delMenuRow('entradas', idx)} style={{justifyContent: 'center', paddingHorizontal: 4}}><Feather name="trash-2" size={22} color={C.danger}/></Touchable>
+                             <Touchable onPress={() => delMenuRow('entradas', idx)} style={{justifyContent: 'center', paddingHorizontal: 4}} accessibilityLabel="Eliminar entrada" accessibilityRole="button"><Feather name="trash-2" size={22} color={C.danger}/></Touchable>
                            </View>
                            
-                           <Text style={{fontSize: 10, fontWeight: '800', color: C.textMuted, marginTop: 8, marginBottom: 4}}>ENVASES (LLEVAR/DELIVERY)</Text>
+                           <Text style={{fontSize: 12, fontWeight: '800', color: C.textMuted, marginTop: 8, marginBottom: 4}}>ENVASES (LLEVAR/DELIVERY)</Text>
                            <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 6}}>
                              {['chico', 'sopa', 'mediano', 'grande'].map(t => {
                                 const tapersAct = Array.isArray(e.taper) ? e.taper : (e.taper ? [e.taper] : []);
                                 const activo = tapersAct.includes(t);
                                 return (
                                    <Touchable key={t} onPress={() => toggleTaperMenu('entradas', idx, t)} style={{backgroundColor: activo ? C.gold : C.bg, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: activo ? C.gold : C.border}}>
-                                      <Text style={{fontSize: 10, fontWeight: 'bold', color: activo ? C.primary : C.textMuted}}>{t.toUpperCase()}</Text>
+                                      <Text style={{fontSize: 12, fontWeight: 'bold', color: activo ? C.primary : C.textMuted}}>{t.toUpperCase()}</Text>
                                    </Touchable>
                                 );
                              })}
@@ -886,11 +551,42 @@ export default function App() {
                        <Text style={{fontWeight: '800', color: C.danger, fontSize: 16}}>SEGUNDOS</Text>
                        <Touchable onPress={() => addMenuRow('segundos')}><Text style={{color: C.danger, fontWeight: '800', fontSize: 14}}>+ Añadir</Text></Touchable>
                     </View>
+                    {/* 🟢 BOTONES RÁPIDOS DE PLATOS DEFAULT PARA DOMINGO */}
+                    {admin.menuData.modoDomingo && (
+                      <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12, backgroundColor: '#FEF3C7', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#F59E0B'}}>
+                        <View style={{width: '100%', marginBottom: 4}}>
+                          <Text style={{fontSize: 12, fontWeight: '800', color: '#92400E', textTransform: 'uppercase'}}>
+                            <Feather name="zap" size={12} color="#92400E" /> Añadir rápido:
+                          </Text>
+                        </View>
+                        {PLATOS_DEFAULT_DOMINGO.map((plato: any, i: number) => {
+                          const yaAgregado = (admin.menuData.segundos || []).some((s: any) => s.nombre === plato.nombre);
+                          return (
+                            <Touchable
+                              key={i}
+                              disabled={yaAgregado}
+                              onPress={() => addDefaultDomingoPlato(plato.nombre)}
+                              style={{
+                                paddingVertical: 4,
+                                paddingHorizontal: 10,
+                                backgroundColor: yaAgregado ? '#D1D5DB' : '#F59E0B',
+                                borderRadius: 6,
+                                opacity: yaAgregado ? 0.6 : 1
+                              }}
+                            >
+                              <Text style={{fontSize: 12, fontWeight: '800', color: yaAgregado ? '#4B5563' : '#120B06'}}>
+                                {yaAgregado ? '✓ ' : '+ '}{plato.nombre}
+                              </Text>
+                            </Touchable>
+                          );
+                        })}
+                      </View>
+                    )}
                     <View style={{flexDirection: 'row', gap: 8, marginBottom: 16, backgroundColor: C.dangerSoft, padding: 8, borderRadius: 8, alignItems: 'center'}}>
                        <TextInput style={[s.modalInputCompact, {flex: 1, marginBottom: 0, paddingVertical: 6, backgroundColor: C.surface}]} placeholder="Guarnición general" value={admin.guarnicionGlobal} onChangeText={t => setAdmin(prev => ({ ...prev, guarnicionGlobal: t }))} />
                        <Touchable style={{backgroundColor: C.danger, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8, justifyContent: 'center'}} onPress={aplicarGuarnicionGlobal}><Text style={{color: C.surface, fontWeight: '800', fontSize: 11}}>APLICAR A TODOS</Text></Touchable>
                     </View>
-                    {(admin.menuData.segundos||[]).map((sItem, idx) => (
+                    {(admin.menuData.segundos||[]).map((sItem: any, idx: number) => (
                       <View key={sItem.id || `seg-${idx}`} style={{backgroundColor: C.bg, padding: 12, borderRadius: 8, marginBottom: 12}}>
                           <View style={{flexDirection: 'row', gap: 8}}>
                             <View style={{flex: 1, gap: 8}}>
@@ -899,25 +595,25 @@ export default function App() {
                             </View>
                             <View style={{justifyContent: 'space-between', alignItems: 'center', gap: 8}}>
                               <View style={{alignItems: 'center'}}>
-                                <Text style={{fontSize: 9, color: C.danger, fontWeight: 'bold', marginBottom: 2}}>PRECIO S/</Text>
+                                <Text style={{fontSize: 12, color: C.danger, fontWeight: 'bold', marginBottom: 2}}>PRECIO S/</Text>
                                 <TextInput style={[s.modalInputCompact, {width: 75, marginBottom: 0, textAlign: 'center', color: C.danger, fontWeight: '800'}]} placeholder="S/" value={String(sItem.precio)} onChangeText={t => updateMenuArr('segundos', idx, 'precio', t)} keyboardType="decimal-pad" />
                               </View>
                               <View style={{alignItems: 'center'}}>
-                                <Text style={{fontSize: 9, color: '#006989', fontWeight: 'bold', marginBottom: 2}}>📦 STOCK</Text>
-                                <TextInput style={[s.modalInputCompact, {width: 75, marginBottom: 0, textAlign: 'center', borderColor: '#006989', color: '#006989', fontWeight: '800'}]} placeholder="Stock" value={String(sItem.stock || '')} onChangeText={t => updateMenuArr('segundos', idx, 'stock', t)} keyboardType="number-pad" />
+                                <Text style={{fontSize: 12, color: C.teal, fontWeight: 'bold', marginBottom: 2}}>📦 STOCK</Text>
+                                <TextInput style={[s.modalInputCompact, {width: 75, marginBottom: 0, textAlign: 'center', borderColor: C.teal, color: C.teal, fontWeight: '800'}]} placeholder="Stock" value={String(sItem.stock || '')} onChangeText={t => updateMenuArr('segundos', idx, 'stock', t)} keyboardType="number-pad" />
                               </View>
-                              <Touchable onPress={() => delMenuRow('segundos', idx)} style={{padding: 8}}><Feather name="trash-2" size={22} color={C.danger}/></Touchable>
+                              <Touchable onPress={() => delMenuRow('segundos', idx)} style={{padding: 8}} accessibilityLabel="Eliminar segundo" accessibilityRole="button"><Feather name="trash-2" size={22} color={C.danger}/></Touchable>
                             </View>
                           </View>
                           
-                          <Text style={{fontSize: 10, fontWeight: '800', color: C.textMuted, marginTop: 8, marginBottom: 4}}>ENVASES (LLEVAR/DELIVERY)</Text>
+                          <Text style={{fontSize: 12, fontWeight: '800', color: C.textMuted, marginTop: 8, marginBottom: 4}}>ENVASES (LLEVAR/DELIVERY)</Text>
                            <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 6}}>
                              {['chico', 'sopa', 'mediano', 'grande'].map(t => {
                                 const tapersAct = Array.isArray(sItem.taper) ? sItem.taper : (sItem.taper ? [sItem.taper] : []);
                                 const activo = tapersAct.includes(t);
                                 return (
                                    <Touchable key={t} onPress={() => toggleTaperMenu('segundos', idx, t)} style={{backgroundColor: activo ? C.danger : C.surface, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: activo ? C.danger : C.border}}>
-                                      <Text style={{fontSize: 10, fontWeight: 'bold', color: activo ? C.surface : C.textMuted}}>{t.toUpperCase()}</Text>
+                                      <Text style={{fontSize: 12, fontWeight: 'bold', color: activo ? C.surface : C.textMuted}}>{t.toUpperCase()}</Text>
                                    </Touchable>
                                 );
                              })}
@@ -927,10 +623,339 @@ export default function App() {
                  </View>
 
                  <Text style={s.seccionTitle}>BEBIDA INCLUIDA</Text>
-                 <TextInput style={[s.modalInputCompact, {minHeight: 80}]} placeholder="Ej: Chicha Morada..." value={admin.menuData.refresco} onChangeText={t => updateAdminMenu({refresco: t})} multiline />
+                 <TextInput 
+                    style={[s.modalInputCompact, { minHeight: 80, textAlignVertical: 'top' }]} 
+                    placeholder="Ej: Chicha Morada..." 
+                    value={admin.menuData.refresco || ''} 
+                    onChangeText={t => updateAdminMenu({refresco: t})} 
+                    multiline 
+                  />
                  <Touchable style={[s.btnPrimary, {marginTop: 20, marginBottom: 40}]} onPress={guardarAdminMenu}><Text style={s.btnPrimaryText}>Publicar Menú en Caja</Text></Touchable>
               </ScrollView>
             </SafeAreaView>
+          </Modal>
+
+          {/* 🆕 Modal Contacto */}
+          <Modal visible={admin.modalContacto} animationType="fade" transparent>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+              <View style={s.modalCard}>
+                <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20}}>
+                  <Text style={s.modalTitle}>Contacto</Text>
+                  <Touchable onPress={() => setAdmin(prev => ({ ...prev, modalContacto: false }))} style={{padding: 8}} accessibilityLabel="Cerrar contacto" accessibilityRole="button">
+                    <Feather name="x" size={24} color={C.textMuted} />
+                  </Touchable>
+                </View>
+                <Text style={{fontSize: 11, fontWeight: '800', color: C.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5}}>WhatsApp</Text>
+                <TextInput style={s.modalInputCompact} placeholder="Número (Ej: 51999000000)" placeholderTextColor={C.textMuted} value={admin.contactoData.whatsapp} onChangeText={t => setAdmin(prev => ({...prev, contactoData: {...prev.contactoData, whatsapp: t}}))} keyboardType="phone-pad" />
+                
+                <Text style={{fontSize: 11, fontWeight: '800', color: C.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5}}>Facebook</Text>
+                <TextInput style={s.modalInputCompact} placeholder="Link de Facebook" placeholderTextColor={C.textMuted} value={admin.contactoData.facebook} onChangeText={t => setAdmin(prev => ({...prev, contactoData: {...prev.contactoData, facebook: t}}))} />
+                
+                <Text style={{fontSize: 11, fontWeight: '800', color: C.textMuted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5}}>Instagram</Text>
+                <TextInput style={[s.modalInputCompact, {marginBottom: 24}]} placeholder="Link de Instagram" placeholderTextColor={C.textMuted} value={admin.contactoData.instagram} onChangeText={t => setAdmin(prev => ({...prev, contactoData: {...prev.contactoData, instagram: t}}))} />
+                
+                <Touchable style={[s.btnPrimary, {backgroundColor: C.teal}]} onPress={guardarContacto}>
+                  <Feather name="save" size={20} color={C.white} style={{marginRight: 8}} />
+                  <Text style={s.btnPrimaryText}>Guardar Contacto</Text>
+                </Touchable>
+              </View>
+            </KeyboardAvoidingView>
+          </Modal>
+
+          {/* 🎫 Modal Socios del Club (canje de premios) — solo Dueño */}
+          <Modal visible={clubAdmin.modal} transparent animationType="fade" onRequestClose={clubAdmin.cerrarSocios}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+              <View style={[s.modalCard, { width: '94%', maxWidth: 620, maxHeight: '88%', padding: 20 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <Text style={[s.modalTitle, { marginBottom: 0 }]}>🎫 Socios del Club</Text>
+                  <Touchable onPress={clubAdmin.cerrarSocios} style={{ padding: 8 }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }} accessibilityLabel="Cerrar socios" accessibilityRole="button">
+                    <Feather name="x" size={24} color={C.textMuted} />
+                  </Touchable>
+                </View>
+
+                {/* Toggle SOCIOS / CANJES / CONFIG */}
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                  <Touchable
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: clubAdmin.vistaLista === 'socios' ? C.primary : C.bg, borderWidth: 1, borderColor: clubAdmin.vistaLista === 'socios' ? C.primary : C.border }}
+                    onPress={() => clubAdmin.setVistaLista('socios')}
+                  >
+                    <Text style={{ color: clubAdmin.vistaLista === 'socios' ? C.surface : C.textMuted, fontWeight: '800', fontSize: 12 }}>👥 SOCIOS</Text>
+                  </Touchable>
+                  <Touchable
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: clubAdmin.vistaLista === 'canjes' ? C.gold : C.bg, borderWidth: 1, borderColor: clubAdmin.vistaLista === 'canjes' ? C.gold : C.border }}
+                    onPress={() => clubAdmin.setVistaLista('canjes')}
+                  >
+                    <Text style={{ color: clubAdmin.vistaLista === 'canjes' ? C.primary : C.textMuted, fontWeight: '800', fontSize: 12 }}>🏆 CANJES</Text>
+                  </Touchable>
+                  <Touchable
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: clubAdmin.vistaLista === 'reportes' ? C.primary : C.bg, borderWidth: 1, borderColor: clubAdmin.vistaLista === 'reportes' ? C.teal : C.border }}
+                    onPress={() => clubAdmin.setVistaLista('reportes')}
+                  >
+                    <Text style={{ color: clubAdmin.vistaLista === 'reportes' ? C.surface : C.textMuted, fontWeight: '800', fontSize: 12 }}>📊 REPORTES</Text>
+                  </Touchable>
+                </View>
+
+                {clubAdmin.vistaLista === 'socios' && (
+                  <>
+                    <Text style={[s.modalSubtitle, { marginBottom: 14, fontSize: 12 }]}>
+                  {clubAdmin.listosParaPremio > 0
+                    ? `${clubAdmin.listosParaPremio} socio${clubAdmin.listosParaPremio > 1 ? 's' : ''} listo${clubAdmin.listosParaPremio > 1 ? 's' : ''} para su premio 🏆 · Meta: ${clubAdmin.meta} visitas`
+                    : `Meta: ${clubAdmin.meta} visitas para el premio · Total: ${clubAdmin.miembros.length} socio${clubAdmin.miembros.length === 1 ? '' : 's'}`}
+                </Text>
+
+                <View style={[s.searchWrap, { marginBottom: 12 }]}>
+                  <Feather name="search" size={18} color={C.textMuted} style={s.searchIcon} />
+                  <TextInput
+                    style={s.searchInput}
+                    placeholder="Buscar por nombre o documento..."
+                    placeholderTextColor={C.textMuted}
+                    value={clubAdmin.busqueda}
+                    onChangeText={clubAdmin.setBusqueda}
+                  />
+                  {clubAdmin.busqueda.length > 0 && (
+                    <Touchable onPress={() => clubAdmin.setBusqueda('')} style={s.searchClear} accessibilityLabel="Limpiar búsqueda" accessibilityRole="button">
+                      <Feather name="x-circle" size={18} color={C.textMuted} />
+                    </Touchable>
+                  )}
+                </View>
+
+                <Touchable
+                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, marginBottom: 14, borderRadius: 10, borderWidth: 1, borderColor: C.border, backgroundColor: C.bg }}
+                  onPress={clubAdmin.cargarSocios}
+                >
+                  <Feather name="refresh-cw" size={14} color={C.textMuted} />
+                  <Text style={{ color: C.textMuted, fontWeight: '700', fontSize: 12 }}>{clubAdmin.cargando ? 'Cargando…' : 'Actualizar lista'}</Text>
+                </Touchable>
+
+                {/* 🎫 Registrar socio nuevo: el backend valida el DNI contra RENIEC */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                  <TextInput
+                    style={[s.searchInput, { flex: 1, marginBottom: 0 }]}
+                    placeholder="DNI nuevo socio (RENIEC)"
+                    placeholderTextColor={C.textMuted}
+                    keyboardType="number-pad"
+                    maxLength={8}
+                    value={clubAdmin.nuevoDni}
+                    onChangeText={clubAdmin.setNuevoDni}
+                  />
+                  <Touchable
+                    disabled={clubAdmin.registrando}
+                    onPress={clubAdmin.registrarSocio}
+                    style={{ paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: C.successLight, alignItems: 'center' }}
+                  >
+                    <Text style={{ color: '#064E3B', fontWeight: '900', fontSize: 12, letterSpacing: 0.5 }}>
+                      {clubAdmin.registrando ? '…' : '＋ SOCIO'}
+                    </Text>
+                  </Touchable>
+                </View>
+
+                {clubAdmin.cargando && clubAdmin.miembros.length === 0 ? (
+                  <Text style={{ textAlign: 'center', color: C.textMuted, padding: 30, fontSize: 14 }}>Cargando socios…</Text>
+                ) : clubAdmin.error !== '' && clubAdmin.miembros.length === 0 ? (
+                  <View style={{ backgroundColor: C.dangerSoft, padding: 14, borderRadius: 12, borderWidth: 1, borderColor: C.danger, marginTop: 4 }}>
+                    <Text style={{ color: C.danger, textAlign: 'center', fontWeight: '800', fontSize: 13 }}>⚠️ {clubAdmin.error}</Text>
+                    <Text style={{ color: C.danger, textAlign: 'center', fontSize: 12, marginTop: 6 }}>
+                      Si es la primera vez, publica las reglas de Firestore para poder ver la lista.
+                    </Text>
+                  </View>
+                ) : clubAdmin.listaFiltrada.length === 0 ? (
+                  <Text style={{ textAlign: 'center', color: C.textMuted, padding: 30, fontSize: 14 }}>
+                    {clubAdmin.miembros.length === 0
+                      ? 'Aún no hay socios registrados. Los clientes crean su tarjeta gratis en la web del club.'
+                      : 'Sin resultados para tu búsqueda.'}
+                  </Text>
+                ) : (
+                  <>
+                    {clubAdmin.error !== '' && (
+                      <View style={{ backgroundColor: C.dangerSoft, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: C.danger, marginBottom: 12 }}>
+                        <Text style={{ color: C.danger, textAlign: 'center', fontWeight: '700', fontSize: 12 }}>⚠️ {clubAdmin.error}</Text>
+                      </View>
+                    )}
+                  <ScrollView style={{ maxHeight: 400 }} contentContainerStyle={{ gap: 10 }}>
+                    {clubAdmin.listaFiltrada.map((socio: any, i: number) => {
+                      const prog = clubAdmin.progresoDe(socio);
+                      const listo = prog.completado;
+                      return (
+                        <View
+                          key={socio.id || `socio-${i}`}
+                          style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: listo ? C.goldSoft : C.bg, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: listo ? C.gold : C.border }}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 14, fontWeight: '800', color: C.textDark }} numberOfLines={1}>{socio.nombre}</Text>
+                            <Text style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{socio.tipo_documento} {enmascararDocumento(socio.documento)}</Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                              <View style={{ flex: 1, height: 8, borderRadius: 99, backgroundColor: C.border, overflow: 'hidden' }}>
+                                <View style={{ height: '100%', width: `${prog.porcentaje}%`, backgroundColor: listo ? C.gold : C.success }} />
+                              </View>
+                              <Text style={{ fontSize: 12, fontWeight: '800', color: listo ? C.goldText : C.textDark }}>{prog.visitas}/{prog.meta}</Text>
+                            </View>
+                          </View>
+                          <Touchable
+                            disabled={!listo || clubAdmin.canjeando === socio.id}
+                            onPress={() => clubAdmin.canjearPremio(socio)}
+                            style={{ marginLeft: 12, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: listo ? C.successLight : C.border, alignItems: 'center' }}
+                          >
+                            <Text style={{ color: listo ? '#064E3B' : C.textMuted, fontWeight: '900', fontSize: 12, letterSpacing: 0.5 }}>
+                              {clubAdmin.canjeando === socio.id ? 'CANJEANDO…' : listo ? '🏆 CANJEAR PREMIO' : 'EN PROGRESO'}
+                            </Text>
+                          </Touchable>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                  </>
+                )}
+                  </>
+                )}
+
+                {clubAdmin.vistaLista === 'reportes' && (
+                  <>
+                    <Text style={[s.modalSubtitle, { marginBottom: 14, fontSize: 12 }]}>
+                      📊 Estadísticas del Club · El crecimiento de la fidelización
+                    </Text>
+
+                    <Touchable
+                      style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, marginBottom: 14, borderRadius: 10, borderWidth: 1, borderColor: C.border, backgroundColor: C.bg }}
+                      onPress={clubAdmin.cargarEstadisticas}
+                    >
+                      <Feather name="refresh-cw" size={14} color={C.textMuted} />
+                      <Text style={{ color: C.textMuted, fontWeight: '700', fontSize: 12 }}>{clubAdmin.cargandoStats ? 'Cargando…' : 'Actualizar reportes'}</Text>
+                    </Touchable>
+
+                    {clubAdmin.cargandoStats && !clubAdmin.stats ? (
+                      <Text style={{ textAlign: 'center', color: C.textMuted, padding: 30, fontSize: 14 }}>Calculando reportes…</Text>
+                    ) : !clubAdmin.stats ? (
+                      <Text style={{ textAlign: 'center', color: C.textMuted, padding: 30, fontSize: 14 }}>
+                        No se pudieron cargar los reportes. Verifica la conexión con la caja (IP).
+                      </Text>
+                    ) : (
+                      <ScrollView style={{ maxHeight: 420 }} contentContainerStyle={{ gap: 12 }}>
+                        {/* KPI cards */}
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                          {([
+                            { label: 'SOCIOS', valor: clubAdmin.stats.total_socios, icon: 'users', color: C.primary },
+                            { label: 'LISTOS 🏆', valor: clubAdmin.stats.listos_premio, icon: 'award', color: C.gold },
+                            { label: '% PREMIO', valor: `${clubAdmin.stats.pct_premio}%`, icon: 'percent', color: C.success },
+                            { label: 'PREMIOS', valor: clubAdmin.stats.total_premios, icon: 'gift', color: C.teal },
+                            { label: 'VISITAS', valor: clubAdmin.stats.total_visitas, icon: 'trending-up', color: C.danger },
+                          ] as const).map((kpi) => (
+                            <View key={kpi.label} style={{ flexBasis: '46%', flexGrow: 1, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.surface, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: C.border }}>
+                              <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: kpi.color + '22', alignItems: 'center', justifyContent: 'center' }}>
+                                <Feather name={kpi.icon} size={16} color={kpi.color} />
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={{ fontSize: 16, fontWeight: '900', color: C.textDark, lineHeight: 18 }}>{kpi.valor}</Text>
+                                <Text style={{ fontSize: 12, fontWeight: '800', color: C.textMuted, letterSpacing: 0.5 }}>{kpi.label}</Text>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+
+                        {/* Socios nuevos por mes */}
+                        <View style={{ backgroundColor: C.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: C.border }}>
+                          <Text style={{ fontSize: 12, fontWeight: '800', color: C.textDark, marginBottom: 10 }}>👥 Socios nuevos por mes</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6, height: 80 }}>
+                            {(clubAdmin.stats.socios_nuevos_por_mes || []).map((m: any) => {
+                              const max = Math.max(1, ...(clubAdmin.stats.socios_nuevos_por_mes || []).map((x: any) => x.socios || 0));
+                              return (
+                                <View key={m.mes} style={{ flex: 1, alignItems: 'center' }}>
+                                  <Text style={{ fontSize: 12, fontWeight: '800', color: C.textDark }}>{m.socios || 0}</Text>
+                                  <View style={{ width: '100%', maxWidth: 30, height: Math.max(4, ((m.socios || 0) / max) * 55), backgroundColor: C.gold, borderRadius: 5 }} />
+                                  <Text style={{ fontSize: 10, color: C.textMuted, fontWeight: '700', marginTop: 3 }}>{m.mes.slice(2)}</Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+
+                        {/* Visitas por día */}
+                        <View style={{ backgroundColor: C.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: C.border }}>
+                          <Text style={{ fontSize: 12, fontWeight: '800', color: C.textDark, marginBottom: 10 }}>👣 Visitas por día (14 días)</Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 3, height: 70 }}>
+                            {(clubAdmin.stats.visitas_ultimos_14 || []).map((d: any) => {
+                              const max = Math.max(1, ...(clubAdmin.stats.visitas_ultimos_14 || []).map((x: any) => x.visitas || 0));
+                              return (
+                                <View key={d.fecha} style={{ flex: 1, alignItems: 'center' }}>
+                                  <View style={{ width: '100%', maxWidth: 14, height: Math.max(3, ((d.visitas || 0) / max) * 45), backgroundColor: C.teal, borderRadius: 3 }} />
+                                  <Text style={{ fontSize: 10, color: C.textMuted, marginTop: 3 }}>{d.fecha.slice(8)}</Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+
+                        {/* Premios por mes */}
+                        <View style={{ backgroundColor: C.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: C.border }}>
+                          <Text style={{ fontSize: 12, fontWeight: '800', color: C.textDark, marginBottom: 10 }}>🏆 Premios entregados por mes</Text>
+                          {(clubAdmin.stats.premios_por_mes || []).some((p: any) => p.premios > 0) ? (
+                            (clubAdmin.stats.premios_por_mes || []).filter((p: any) => p.premios > 0).map((p: any) => {
+                              const max = Math.max(1, ...(clubAdmin.stats.premios_por_mes || []).map((x: any) => x.premios || 0));
+                              return (
+                                <View key={p.mes} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                                  <Text style={{ width: 64, fontSize: 12, fontWeight: '800', color: C.textDark }}>{p.mes}</Text>
+                                  <View style={{ flex: 1, height: 10, backgroundColor: C.border, borderRadius: 99, overflow: 'hidden' }}>
+                                    <View style={{ height: '100%', width: `${Math.min(100, ((p.premios || 0) / max) * 100)}%`, backgroundColor: C.success, borderRadius: 99 }} />
+                                  </View>
+                                  <Text style={{ width: 24, textAlign: 'right', fontSize: 12, fontWeight: '900', color: C.successDark }}>{p.premios}</Text>
+                                </View>
+                              );
+                            })
+                          ) : (
+                            <Text style={{ textAlign: 'center', color: C.textMuted, fontSize: 12, paddingVertical: 8 }}>
+                              Aún no hay premios entregados.
+                            </Text>
+                          )}
+                        </View>
+                      </ScrollView>
+                    )}
+                  </>
+                )}
+
+                {clubAdmin.vistaLista === 'canjes' && (
+                  <>
+                    <Text style={[s.modalSubtitle, { marginBottom: 14, fontSize: 12 }]}>
+                      {clubAdmin.premios.length > 0
+                        ? `${clubAdmin.premios.length} premio${clubAdmin.premios.length > 1 ? 's' : ''} canjeado${clubAdmin.premios.length > 1 ? 's' : ''} 🏆`
+                        : 'Historial de premios canjeados'}
+                    </Text>
+
+                    <Touchable
+                      style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, marginBottom: 14, borderRadius: 10, borderWidth: 1, borderColor: C.border, backgroundColor: C.bg }}
+                      onPress={clubAdmin.cargarPremios}
+                    >
+                      <Feather name="refresh-cw" size={14} color={C.textMuted} />
+                      <Text style={{ color: C.textMuted, fontWeight: '700', fontSize: 12 }}>Actualizar historial</Text>
+                    </Touchable>
+
+                    {clubAdmin.premios.length === 0 ? (
+                      <Text style={{ textAlign: 'center', color: C.textMuted, padding: 30, fontSize: 14 }}>
+                        Aún no hay premios canjeados. Cuando canjees uno, aparecerá aquí.
+                      </Text>
+                    ) : (
+                      <ScrollView style={{ maxHeight: 400 }} contentContainerStyle={{ gap: 10 }}>
+                        {clubAdmin.premios.map((p: any, i: number) => (
+                          <View key={p.id || `premio-${i}`} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: C.bg, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: C.border }}>
+                            <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: C.goldSoft, alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                              <Text style={{ fontSize: 18 }}>🏆</Text>
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 14, fontWeight: '800', color: C.textDark }} numberOfLines={1}>{p.nombre}</Text>
+                              <Text style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>{enmascararDocumento(p.documento)} · {p.sede}</Text>
+                            </View>
+                            <View style={{ alignItems: 'flex-end' }}>
+                              <Text style={{ fontSize: 12, fontWeight: '800', color: C.goldText }}>{p.fecha_local}</Text>
+                              {p.canjeado_por !== '' && <Text style={{ fontSize: 12, color: C.textMuted, marginTop: 2 }}>{p.canjeado_por}</Text>}
+                            </View>
+                          </View>
+                        ))}
+                      </ScrollView>
+                    )}
+                  </>
+                )}
+
+
+              </View>
+            </KeyboardAvoidingView>
           </Modal>
         </>
       )}
@@ -939,7 +964,7 @@ export default function App() {
       {!sys.modoConfig && authData.usuarioActivo && authData.usuarioActivo.rol !== 'admin' && mozo.vistaActual === 'comandar' && mozo.mesaActiva && (
         <>
           <View style={s.navbar}>
-            <Touchable style={s.navBackBtn} onPress={() => setMozo(prev => ({ ...prev, vistaActual: 'mesas' }))} hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}>
+            <Touchable style={s.navBackBtn} onPress={() => setMozo(prev => ({ ...prev, vistaActual: 'mesas' }))} hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}>
               <Feather name="chevron-left" size={28} color={C.surface} />
               <Text style={s.navBackText}>Mesas</Text>
             </Touchable>
@@ -947,55 +972,80 @@ export default function App() {
             <View style={{ width: 80 }} />
           </View>
 
-          <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: 12, paddingBottom: carrito.length > 0 ? 320 : 40 }} keyboardShouldPersistTaps="handled" contentInsetAdjustmentBehavior="automatic">
+          <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: PADDING, paddingBottom: carrito.length > 0 ? 320 : 40 }} keyboardShouldPersistTaps="handled" contentInsetAdjustmentBehavior="automatic">
             <View style={s.searchWrap}>
               <Feather name="search" size={20} color={C.textMuted} style={s.searchIcon} />
               <TextInput style={s.searchInput} placeholder="Buscar plato..." placeholderTextColor={C.textMuted} value={mozo.filtroCarta} onChangeText={t => setMozo(prev => ({ ...prev, filtroCarta: t }))} />
-              {mozo.filtroCarta.length > 0 && <Touchable onPress={() => setMozo(prev => ({ ...prev, filtroCarta: '' }))} style={s.searchClear}><Feather name="x-circle" size={20} color={C.textMuted} /></Touchable>}
+              {mozo.filtroCarta.length > 0 && <Touchable onPress={() => setMozo(prev => ({ ...prev, filtroCarta: '' }))} style={s.searchClear} accessibilityLabel="Limpiar búsqueda" accessibilityRole="button"><Feather name="x-circle" size={20} color={C.textMuted} /></Touchable>}
             </View>
 
             {mozo.filtroCarta === '' && (
               <>
-                <View style={s.quickGrid}>
-                  <Touchable style={[s.quickBtn, s.quickBtnBlue]} onPress={() => agregarAlCarrito({ nombre: 'TAPER CHICO', precio: 1.0 }, 'GENERAL')}>
-                    <MaterialCommunityIcons name="cube-outline" size={28} color={C.primary} style={{marginBottom: 4}} />
-                    <Text style={s.quickBtnLabel}>T. Chico</Text>
-                    <Text style={s.quickBtnPrice}>S/ 1.00</Text>
-                  </Touchable>
-                  <Touchable style={[s.quickBtn, s.quickBtnRed]} onPress={() => agregarAlCarrito({ nombre: 'TAPER MEDIANO', precio: 2.0 }, 'GENERAL')}>
-                    <MaterialCommunityIcons name="cube" size={28} color={C.danger} style={{marginBottom: 4}} />
-                    <Text style={[s.quickBtnLabel, {color: C.danger}]}>T. Mediano</Text>
-                    <Text style={[s.quickBtnPrice, {color: C.danger}]}>S/ 2.00</Text>
-                  </Touchable>
-                </View>
-                <View style={[s.quickGrid, {marginBottom: 16}]}>
-                  <Touchable style={[s.quickBtn, {backgroundColor: C.surface}]} onPress={() => agregarAlCarrito({ nombre: 'HUMITA', precio: 3.0 }, 'ENTRADAS')}>
-                    <MaterialCommunityIcons name="corn" size={28} color={C.gold} style={{marginBottom: 4}} />
-                    <Text style={[s.quickBtnLabel, {color: C.gold}]}>Humita</Text>
-                    <Text style={s.quickBtnPrice}>S/ 3.00</Text>
-                  </Touchable>
-                  <Touchable style={[s.quickBtn, {backgroundColor: C.surface}]} onPress={() => agregarAlCarrito({ nombre: 'REFRESCO', precio: appData.modoDomingo ? 3.5 : 2.0 }, 'BEBIDAS')}>
-                    <MaterialCommunityIcons name="glass-cocktail" size={28} color={C.primary} style={{marginBottom: 4}} />
-                    <Text style={[s.quickBtnLabel, {color: C.primary}]}>Refresco</Text>
-                    <Text style={s.quickBtnPrice}>S/ {appData.modoDomingo ? '3.50' : '2.00'}</Text>
-                  </Touchable>
-                </View>
-                <Touchable style={s.fueraCarta} onPress={() => setUi(prev => ({ ...prev, modalFueraCarta: true }))}>
-                  <Feather name="edit-3" size={18} color={C.textMuted} /><Text style={s.fueraCartaText}>Plato fuera de carta</Text>
+                {(() => {
+                  const extraStock = (appData as any).extrasStock || {};
+                  const taperChicoAgotado = (extraStock['TAPER CHICO'] ?? 99) <= 0;
+                  const taperMedianoAgotado = (extraStock['TAPER MEDIANO'] ?? 99) <= 0;
+                  const humitaAgotado = (extraStock['HUMITA'] ?? 99) <= 0;
+                  return (
+                    <>
+                      <View style={s.quickGrid}>
+                        <Touchable style={[s.quickBtn, {borderColor: C.teal, backgroundColor: taperChicoAgotado ? C.border : '#EBF5F8', borderWidth: 2, opacity: taperChicoAgotado ? 0.5 : 1}]} disabled={taperChicoAgotado} onPress={() => agregarAlCarrito({ nombre: 'TAPER CHICO', precio: 1.0 }, 'GENERAL')}>
+                          <MaterialCommunityIcons name="cube-outline" size={28} color={taperChicoAgotado ? C.textMuted : C.teal} style={{marginBottom: 4}} />
+                          <Text style={[s.quickBtnLabel, {color: taperChicoAgotado ? C.textMuted : C.teal}]}>{taperChicoAgotado ? 'AGOTADO' : 'T. Chico'}</Text>
+                          <Text style={[s.quickBtnPrice, taperChicoAgotado && {color: C.textMuted}]}>{taperChicoAgotado ? 'Sin stock' : 'S/ 1.00'}</Text>
+                        </Touchable>
+                        <Touchable style={[s.quickBtn, {borderColor: C.danger, backgroundColor: taperMedianoAgotado ? C.border : C.dangerSoft, borderWidth: 2, opacity: taperMedianoAgotado ? 0.5 : 1}]} disabled={taperMedianoAgotado} onPress={() => agregarAlCarrito({ nombre: 'TAPER MEDIANO', precio: 2.0 }, 'GENERAL')}>
+                          <MaterialCommunityIcons name="cube" size={28} color={taperMedianoAgotado ? C.textMuted : C.danger} style={{marginBottom: 4}} />
+                          <Text style={[s.quickBtnLabel, {color: taperMedianoAgotado ? C.textMuted : C.danger}]}>{taperMedianoAgotado ? 'AGOTADO' : 'T. Mediano'}</Text>
+                          <Text style={[s.quickBtnPrice, {color: taperMedianoAgotado ? C.textMuted : C.danger}]}>{taperMedianoAgotado ? 'Sin stock' : 'S/ 2.00'}</Text>
+                        </Touchable>
+                      </View>
+                      <View style={[s.quickGrid, { marginBottom: 16 }]}>
+                        <Touchable style={[s.quickBtn, {backgroundColor: humitaAgotado ? C.border : '#F0FDF4', borderColor: '#22C55E', borderWidth: 2, opacity: humitaAgotado ? 0.5 : 1}]} disabled={humitaAgotado} onPress={() => agregarAlCarrito({ nombre: 'HUMITA', precio: 4.0 }, 'GENERAL')}>
+                          <MaterialCommunityIcons name="corn" size={28} color={humitaAgotado ? C.textMuted : '#16A34A'} style={{marginBottom: 4}} />
+                          <Text style={[s.quickBtnLabel, {color: humitaAgotado ? C.textMuted : '#16A34A'}]}>{humitaAgotado ? 'AGOTADO' : 'Humita'}</Text>
+                          <Text style={[s.quickBtnPrice, humitaAgotado && {color: C.textMuted}]}>{humitaAgotado ? 'Sin stock' : 'S/ 4.00'}</Text>
+                        </Touchable>
+                        <Touchable style={[s.quickBtn, {backgroundColor: '#EBF5F8', borderColor: C.teal, borderWidth: 2}]} onPress={() => agregarAlCarrito({ nombre: 'REFRESCO', precio: appData.modoDomingo ? 3.5 : 2.0 }, 'BEBIDAS')}>
+                          <MaterialCommunityIcons name="bottle-soda-outline" size={28} color={C.teal} style={{marginBottom: 4}} />
+                          <Text style={[s.quickBtnLabel, {color: C.teal}]}>Refresco</Text>
+                          <Text style={s.quickBtnPrice}>S/ {appData.modoDomingo ? '3.50' : '2.00'}</Text>
+                        </Touchable>
+                      </View>
+                    </>
+                  );
+                })()}
+                <Touchable style={[s.fueraCarta, {backgroundColor: '#FFF7ED', borderColor: '#F59E0B', borderWidth: 2}]} onPress={() => setUi(prev => ({ ...prev, modalFueraCarta: true }))}>
+                  <Feather name="edit-3" size={18} color={'#D97706'} /><Text style={[s.fueraCartaText, {color: '#92400E', fontWeight: '800'}]}>Plato fuera de carta</Text>
                 </Touchable>
               </>
             )}
 
             {mozo.mesaActiva.pedido?.length > 0 && mozo.filtroCarta === '' && (
               <View style={s.yaPedidoCard}>
-                <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 8}}>
-                  <Feather name="list" size={16} color={C.primary} /><Text style={s.yaPedidoTitle}>Ya en esta mesa</Text>
+                <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8}}>
+                  <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                    <Feather name="list" size={16} color={C.primary} /><Text style={s.yaPedidoTitle}>Ya en esta mesa</Text>
+                  </View>
+                  {(() => {
+                    const cambios = obtenerHistorialCambios(mozo.mesaActiva.pedido);
+                    return cambios.length > 0 ? (
+                      <Touchable
+                        style={{flexDirection: 'row', alignItems: 'center', backgroundColor: C.danger, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, gap: 4}}
+                        onPress={() => setUi(prev => ({ ...prev, modalHistorialCambios: true }))}
+                      >
+                        <Feather name="rotate-ccw" size={12} color={C.white} />
+                        <Text style={{color: C.white, fontWeight: '800', fontSize: 12}}>{cambios.length} Cambio{cambios.length > 1 ? 's' : ''}</Text>
+                      </Touchable>
+                    ) : null;
+                  })()}
                 </View>
-                {mozo.mesaActiva.pedido.map((p, i) => (
+                {mozo.mesaActiva.pedido.map((p: any, i: number) => (
                   <View key={p.id || `pedido-${i}`} style={s.yaPedidoRow}>
                     <Text style={s.yaPedidoItem}>
                       <Text style={{ color: C.danger, fontWeight: '700' }}>{p.cantidad}×  </Text>
                       <Text style={{ color: C.textDark, fontWeight: '600' }}>{p.nombre}</Text>
+                      {['entradas', 'segundos'].includes(p.categoria?.toLowerCase()) && <Text style={{ color: C.goldText, fontSize: 12, fontWeight: '800' }}> (MENÚ)</Text>}
                       {p.modalidad !== 'local' && <Text style={{ color: C.textMuted }}> · {p.modalidad}</Text>}
                     </Text>
                   </View>
@@ -1003,47 +1053,62 @@ export default function App() {
               </View>
             )}
 
-            {appData.carta.filter(c => ['entradas', 'segundos'].includes(c.nombre.toLowerCase().trim())).map((cat) => {
+            {appData.carta.filter((c: any) => ['entradas', 'segundos'].includes(c.nombre.toLowerCase().trim())).map((cat: any) => {
               if (appData.modoDomingo && cat.nombre.toLowerCase().trim() === 'entradas') return null;
-              const items = cat.items.filter(p => p.nombre.toLowerCase().includes(mozo.filtroCarta.toLowerCase()));
+              const items = cat.items.filter((p: any) => p.nombre.toLowerCase().includes(mozo.filtroCarta.toLowerCase()));
               if (items.length === 0) return null;
-              const esEntrada = cat.nombre === 'entradas';
+              const catConf = getCatConf(cat.nombre);
               return (
                 <View key={cat.nombre} style={{ marginBottom: 10 }}>
-                  <Text style={s.catLabel}>{cat.nombre}</Text>
-                  <View style={s.platosGrid}>
-                    {items.map(plato => {
-                      const cantEnCarrito = carrito.filter(i => i.nombre === plato.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
-                      
-                      // 🟢 NUEVAS BANDERAS DE INVENTARIO
+                  <View style={s.catHeader}>
+                    <View style={[s.catHeaderIcon, {backgroundColor: catConf.color}]}>
+                      <MaterialCommunityIcons name={catConf.icon as any} size={16} color={C.white} />
+                    </View>
+                    <Text style={[s.catLabel, {marginBottom: 0, marginTop: 0}]}>{cat.nombre.toUpperCase()}</Text>
+                  </View>
+                  <View style={[s.platosGrid, { justifyContent: 'space-between' }]}>
+                    {items.map((plato: any) => {
+                      const cantEnCarrito = carrito.filter(i => i.nombre === plato.nombre && i.categoria === cat.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
                       const agotado = plato.stock_actual !== null && plato.stock_actual <= 0;
                       const pocoStock = plato.stock_actual !== null && plato.stock_actual <= 3 && plato.stock_actual > 0;
+                      // 🟢 FIX RESPONSIVE: fuente dinámica para que el nombre del plato nunca se corte
+                      const nombrePlato = plato.nombre || '';
+                      const tamanoNombre = nombrePlato.length > 34 ? 11 : nombrePlato.length > 24 ? 12 : nombrePlato.length > 16 ? 12 : 13;
 
                       return (
                         <Touchable 
                            key={plato.id || plato.nombre} 
-                           style={[s.platoBtn, agotado && { opacity: 0.4, backgroundColor: C.border }]} 
+                           style={[
+                             s.platoBtn, 
+                             { width: PLATO_CARD_WIDTH, backgroundColor: catConf.tintBg },
+                             agotado && { opacity: 0.5, backgroundColor: C.border }
+                           ]} 
                            disabled={agotado}
                            onPress={() => agregarAlCarrito(plato, cat.nombre)}
                         >
-                          <View style={[s.platoBtnBar, { backgroundColor: agotado ? C.textMuted : (esEntrada ? C.primary : C.danger) }]} />
-                          
-                          {/* Globo rojo vibrante para stock crítico */}
-                          {pocoStock && (
-                            <View style={[s.badgeComanda, { backgroundColor: C.danger }]}>
-                              <Text style={s.badgeComandaText}>¡Solo quedan {plato.stock_actual}!</Text>
-                            </View>
-                          )}
-
-                          {/* Badge de "Ya en carrito" (el que hicimos antes) */}
-                          {cantEnCarrito > 0 && !pocoStock && (
-                            <View style={s.badgeComanda}>
-                              <Text style={s.badgeComandaText}>{cantEnCarrito} pedidos</Text>
-                            </View>
-                          )}
-
-                          <Text style={[s.platoNombre, agotado && { textDecorationLine: 'line-through', color: C.textMuted }]} numberOfLines={2}>{plato.nombre}</Text>
-                          <Text style={[s.platoPrecio, { color: agotado ? C.textMuted : (esEntrada ? C.primary : C.danger) }]}>
+                          <>
+                            {pocoStock && (
+                              <View style={s.stockBadge}>
+                                <Feather name="alert-triangle" size={10} color={C.white} />
+                                <Text style={s.stockBadgeText}>¡{plato.stock_actual}!</Text>
+                              </View>
+                            )}
+                            {cantEnCarrito > 0 && (
+                              <View style={s.badgeComanda}>
+                                <Text style={s.badgeComandaText}>{cantEnCarrito}</Text>
+                              </View>
+                            )}
+                          </>
+                          <View style={[s.platoBtnBar, { backgroundColor: agotado ? C.textMuted : catConf.color }]} />
+                          <Text
+                            style={[
+                              s.platoNombre,
+                              { fontSize: tamanoNombre, lineHeight: tamanoNombre + 4 },
+                              agotado && { textDecorationLine: 'line-through', color: C.textMuted }
+                            ]}
+                            numberOfLines={3}
+                          >{nombrePlato}</Text>
+                          <Text style={[s.platoPrecio, { color: agotado ? C.textMuted : catConf.color }]}>
                             {agotado ? 'AGOTADO' : `S/ ${plato.precio.toFixed(2)}`}
                           </Text>
                         </Touchable>
@@ -1054,30 +1119,50 @@ export default function App() {
               );
             })}
 
-            {appData.carta.filter(c => c.nombre !== 'entradas' && c.nombre !== 'segundos').map((cat) => {
-              const items = cat.items.filter(p => p.nombre.toLowerCase().includes(mozo.filtroCarta.toLowerCase()));
+            {appData.carta.filter((c: any) => c.nombre !== 'entradas' && c.nombre !== 'segundos').map((cat: any) => {
+              const items = cat.items.filter((p: any) => p.nombre.toLowerCase().includes(mozo.filtroCarta.toLowerCase()));
               if (items.length === 0) return null;
+              const catConf = getCatConf(cat.nombre);
               return (
                 <View key={cat.nombre} style={s.seccionWrap}>
-                  <Text style={s.seccionTitle}><Feather name="book-open" size={18} color={C.textMuted}/> {cat.nombre}</Text>
-                  <View style={s.platosGrid}>
-                    {items.map(plato => {
-                      // 🟢 Calculamos si este plato ya está en el carrito actual
-                      const cantEnCarrito = carrito.filter(i => i.nombre === plato.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
-                      
+                  <View style={s.seccionHeader}>
+                    <View style={[s.catHeaderIcon, {backgroundColor: catConf.color}]}>
+                      <MaterialCommunityIcons name={catConf.icon as any} size={16} color={C.white} />
+                    </View>
+                    <Text style={s.seccionHeaderTitle}>{cat.nombre}</Text>
+                    <View style={[s.seccionHeaderLine, {backgroundColor: catConf.color}]} />
+                  </View>
+                  <View style={[s.platosGrid, { justifyContent: 'space-between' }]}>
+                    {items.map((plato: any) => {
+                      const cantEnCarrito = carrito.filter(i => i.nombre === plato.nombre && i.categoria === cat.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
+                      const agotado = plato.stock_actual !== null && plato.stock_actual <= 0;
+                      const pocoStock = plato.stock_actual !== null && plato.stock_actual <= 3 && plato.stock_actual > 0;
+                      // 🟢 FIX RESPONSIVE: fuente dinámica para que el nombre del plato nunca se corte
+                      const nombrePlato = plato.nombre || '';
+                      const tamanoNombre = nombrePlato.length > 34 ? 11 : nombrePlato.length > 24 ? 12 : nombrePlato.length > 16 ? 12 : 13;
                       return (
-                        <Touchable key={plato.id || plato.nombre} style={s.platoBtn} onPress={() => agregarAlCarrito(plato, cat.nombre)}>
-                          <View style={[s.platoBtnBar, { backgroundColor: cat.nombre === 'entradas' ? C.primary : (cat.nombre === 'segundos' ? C.danger : C.textDark) }]} />
-                          
-                          {/* 🟢 Badge visual de advertencia */}
-                          {cantEnCarrito > 0 && (
-                            <View style={s.badgeComanda}>
-                              <Text style={s.badgeComandaText}>{cantEnCarrito} pedidos</Text>
-                            </View>
-                          )}
-
-                          <Text style={s.platoNombre} numberOfLines={2}>{plato.nombre}</Text>
-                          <Text style={[s.platoPrecio, { color: cat.nombre === 'entradas' ? C.primary : (cat.nombre === 'segundos' ? C.danger : C.textDark) }]}>S/ {plato.precio.toFixed(2)}</Text>
+                        <Touchable key={plato.id || plato.nombre} style={[s.platoBtn, { width: PLATO_CARD_WIDTH, backgroundColor: catConf.tintBg }, agotado && { opacity: 0.5, backgroundColor: C.border }]} disabled={agotado} onPress={() => agregarAlCarrito(plato, cat.nombre)}>
+                          <>
+                            {pocoStock && (
+                              <View style={s.stockBadge}>
+                                <Feather name="alert-triangle" size={10} color={C.white} />
+                                <Text style={s.stockBadgeText}>¡{plato.stock_actual}!</Text>
+                              </View>
+                            )}
+                            {cantEnCarrito > 0 && (
+                              <View style={s.badgeComanda}>
+                                <Text style={s.badgeComandaText}>{cantEnCarrito}</Text>
+                              </View>
+                            )}
+                          </>
+                          <View style={[s.platoBtnBar, { backgroundColor: agotado ? C.textMuted : catConf.color }]} />
+                          <Text
+                            style={[s.platoNombre, { fontSize: tamanoNombre, lineHeight: tamanoNombre + 4 }, agotado && { textDecorationLine: 'line-through', color: C.textMuted }]}
+                            numberOfLines={3}
+                          >{nombrePlato}</Text>
+                          <Text style={[s.platoPrecio, { color: agotado ? C.textMuted : catConf.color }]}>
+                            {agotado ? 'AGOTADO' : `S/ ${plato.precio.toFixed(2)}`}
+                          </Text>
                         </Touchable>
                       );
                     })}
@@ -1113,13 +1198,15 @@ export default function App() {
                       <View key={item.id} style={s.carritoItem}>
                         <View style={s.carritoItemRow1}>
                           <View style={{ flex: 1 }}>
-                            <Text style={s.carritoItemNombre} numberOfLines={2}><Text style={{ color: C.primary, fontWeight: '800' }}>{item.cantidad}×  </Text>{item.nombre}</Text>
-                            {/* 🟢 MOSTRAR TAPER EN CARRITO */}
+                            <Text style={s.carritoItemNombre} numberOfLines={2}>
+                               <Text style={{ color: C.primary, fontWeight: '800' }}>{item.cantidad}×  </Text>
+                               {item.nombre}
+                               {['entradas', 'segundos'].includes(item.categoria?.toLowerCase()) && <Text style={{color: C.goldText, fontSize: 12}}> (MENÚ)</Text>}
+                            </Text>
                             {item.modalidad !== 'local' && item.taper && <Text style={{fontSize: 11, color: C.textMuted, marginTop: 2, fontWeight: 'bold'}}>+ Envase {Array.isArray(item.taper) ? item.taper.join(' y ') : item.taper}</Text>}
                             {item.cliente && <Text style={s.carritoItemNota}><Feather name="map-pin" size={12}/> Delivery a: {item.cliente.nombre}</Text>}
                             {item.nota ? <Text style={s.carritoItemNota}><Feather name="alert-circle" size={12}/> {item.nota}</Text> : null}
                           </View>
-                          {/* 🟢 NUEVO: Muestra el subtotal real con tapers al instante */}
                           <Text style={s.carritoItemPrecio}>S/ {((item.precio + calcularRecargoTaperMozo(item)) * item.cantidad).toFixed(2)}</Text>
                         </View>
                         <View style={s.carritoItemRow2}>
@@ -1128,28 +1215,29 @@ export default function App() {
                             <Text style={[s.modBtnText, !esLocal && s.modBtnTextActiva]}>{modLabelText(item.modalidad)}</Text>
                             <Feather name="refresh-cw" size={12} color={esLocal ? C.textMuted : C.white} style={{marginLeft: 4}}/>
                           </Touchable>
-                          <View style={s.carritoControles}>
-                            <Touchable style={s.notaBtn} onPress={() => { setUi(prev => ({ ...prev, itemEditando: idx, notaInput: carrito[idx].nota || '', modalNota: true, notaCantidadMover: 1 })); }}><Feather name="file-text" size={18} color={C.textMuted} /></Touchable>
+                          <View style={[s.carritoControles, { gap: isTablet ? 12 : 8 }]}>
+                            <Touchable style={[s.notaBtn, { width: isTablet ? 48 : 40, height: isTablet ? 48 : 40 }]} onPress={() => { setUi(prev => ({ ...prev, itemEditando: idx, notaInput: carrito[idx].nota || '', modalNota: true, notaCantidadMover: 1 })); }} accessibilityLabel={`Nota para ${item.nombre}`} accessibilityRole="button"><Feather name="file-text" size={18} color={C.textMuted} /></Touchable>
                             <View style={s.qtyControls}>
-                              <Touchable style={s.qtyBtn} onPress={() => modificarCantidad(idx, -1)}><Feather name="minus" size={20} color={C.textDark} /></Touchable>
+                              <Touchable style={[s.qtyBtn, { width: isTablet ? 48 : 40, height: isTablet ? 48 : 40 }]} onPress={() => modificarCantidad(idx, -1)} accessibilityLabel={`Disminuir cantidad de ${item.nombre}`} accessibilityRole="button"><Feather name="minus" size={20} color={C.textDark} /></Touchable>
                               <Text style={s.qtyNumber}>{item.cantidad}</Text>
-                              <Touchable style={s.qtyBtn} onPress={() => modificarCantidad(idx, 1)}><Feather name="plus" size={20} color={C.textDark} /></Touchable>
+                              <Touchable style={[s.qtyBtn, { width: isTablet ? 48 : 40, height: isTablet ? 48 : 40 }]} onPress={() => modificarCantidad(idx, 1)} accessibilityLabel={`Aumentar cantidad de ${item.nombre}`} accessibilityRole="button"><Feather name="plus" size={20} color={C.textDark} /></Touchable>
                             </View>
-                            <Touchable style={s.eliminarBtn} onPress={() => {
+                            <Touchable style={[s.eliminarBtn, { width: isTablet ? 48 : 40, height: isTablet ? 48 : 40 }]} onPress={() => {
                               modificarCantidad(idx, -item.cantidad);
                               if(carrito.length === 1) setCartVisible(false);
-                            }}><Feather name="trash-2" size={18} color={C.danger} /></Touchable>
+                            }} accessibilityLabel={`Eliminar ${item.nombre}`} accessibilityRole="button"><Feather name="trash-2" size={18} color={C.danger} /></Touchable>
                           </View>
                         </View>
                       </View>
                     );
                   })}
-                </ScrollView>
-
-                <View style={s.carritoFooter}>
-                  <Touchable style={s.btnPrimary} onPress={() => { setCartVisible(false); enviarComanda(); }}>
-                    <Feather name="send" size={20} color={C.white} style={{marginRight: 8}} />
-                    <Text style={s.btnPrimaryText}>Enviar a Cocina</Text>
+                </ScrollView>                    <View style={[s.carritoFooter, { paddingBottom: 16 + insets.bottom }]}>
+                  <Touchable style={[s.btnPrimary, {backgroundColor: C.primary, borderRadius: 16, padding: 20, elevation: 6, boxShadow: '0px 3px 6px rgba(0, 0, 0, 0.15)'}]} onPress={() => { setCartVisible(false); enviarComanda(); }}>
+                    <MaterialCommunityIcons name="send" size={22} color={C.white} style={{marginRight: 10}} />
+                    <Text style={[s.btnPrimaryText, {fontSize: 17}]}>Enviar a Cocina</Text>
+                    <View style={{backgroundColor: C.gold, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 4, marginLeft: 12}}>
+                      <Text style={{color: C.primary, fontWeight: '800', fontSize: 14}}>{totalItems}</Text>
+                    </View>
                   </Touchable>
                 </View>
               </View>
@@ -1167,6 +1255,7 @@ export default function App() {
                   <Touchable 
                     style={[s.qtyBtn, {backgroundColor: C.bg, width: 50, height: 50, borderRadius: 25}]} 
                     onPress={() => setUiSplit(p => ({...p, cantidadMover: Math.max(1, p.cantidadMover - 1)}))}
+                    accessibilityLabel="Disminuir cantidad" accessibilityRole="button"
                   >
                     <Feather name="minus" size={24} color={C.textDark} />
                   </Touchable>
@@ -1178,6 +1267,7 @@ export default function App() {
                   <Touchable 
                     style={[s.qtyBtn, {backgroundColor: C.bg, width: 50, height: 50, borderRadius: 25}]} 
                     onPress={() => setUiSplit(p => ({...p, cantidadMover: Math.min(p.cantidadTotal, p.cantidadMover + 1)}))}
+                    accessibilityLabel="Aumentar cantidad" accessibilityRole="button"
                   >
                     <Feather name="plus" size={24} color={C.textDark} />
                   </Touchable>
@@ -1195,22 +1285,21 @@ export default function App() {
 
           {/* Modal Nota con Fraccionamiento Integrado */}
           <Modal visible={ui.modalNota} transparent animationType="fade">
-            <KeyboardAvoidingView behavior={Platform.OS === 'iOS' ? 'padding' : 'height'} style={s.modalOverlay}>
+            <KeyboardAvoidingView behavior="padding" style={s.modalOverlay}>
               <View style={s.modalCard}>
                 <Text style={s.modalTitle}>Nota para cocina</Text>
                 <Text style={s.modalSubtitle}>Ej: sin cebolla, poca sal</Text>
-                <TextInput style={s.modalInput} placeholder="Escribe la nota..." placeholderTextColor={C.border} value={ui.notaInput} onChangeText={t => setUi(prev => ({ ...prev, notaInput: t }))} multiline />
+                <TextInput style={s.modalInput} placeholder="Escribe la nota..." placeholderTextColor={C.textMuted} value={ui.notaInput} onChangeText={t => setUi(prev => ({ ...prev, notaInput: t }))} multiline />
                 
-                {/* Renderizado condicional del split si el mozo seleccionó un grupo */}
                 {ui.itemEditando !== null && carrito[ui.itemEditando]?.cantidad > 1 && (
                   <View style={{ alignItems: 'center', marginBottom: 20 }}>
                     <Text style={{ fontSize: 12, fontWeight: '800', color: C.textMuted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.3 }}>¿A cuántos platos aplicar nota?</Text>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 20 }}>
-                      <Touchable style={[s.qtyBtn, {backgroundColor: C.bg, width: 44, height: 44, borderRadius: 22}]} onPress={() => setUi(prev => ({ ...prev, notaCantidadMover: Math.max(1, prev.notaCantidadMover - 1) }))}>
+                      <Touchable style={[s.qtyBtn, {backgroundColor: C.bg, width: 44, height: 44, borderRadius: 22}]} onPress={() => setUi(prev => ({ ...prev, notaCantidadMover: Math.max(1, prev.notaCantidadMover - 1) }))} accessibilityLabel="Menos platos con nota" accessibilityRole="button">
                         <Feather name="minus" size={20} color={C.textDark} />
                       </Touchable>
                       <Text style={{ fontSize: 26, fontWeight: '800', color: C.textDark, minWidth: 40, textAlign: 'center' }}>{ui.notaCantidadMover}</Text>
-                      <Touchable style={[s.qtyBtn, {backgroundColor: C.bg, width: 44, height: 44, borderRadius: 22}]} onPress={() => setUi(prev => ({ ...prev, notaCantidadMover: Math.min(carrito[ui.itemEditando].cantidad, prev.notaCantidadMover + 1) }))}>
+                      <Touchable style={[s.qtyBtn, {backgroundColor: C.bg, width: 44, height: 44, borderRadius: 22}]} onPress={() => setUi(prev => ({ ...prev, notaCantidadMover: Math.min(ui.itemEditando != null ? carrito[ui.itemEditando].cantidad : 0, prev.notaCantidadMover + 1) }))} accessibilityLabel="Más platos con nota" accessibilityRole="button">
                         <Feather name="plus" size={20} color={C.textDark} />
                       </Touchable>
                     </View>
@@ -1227,8 +1316,7 @@ export default function App() {
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
               <View style={s.modalCard}>
                 <Text style={s.modalTitle}>Datos de Delivery</Text><Text style={s.modalSubtitle}>¿A dónde enviamos este plato?</Text>
-                <TextInput style={s.modalInputCompact} placeholder="Nombre del Cliente" placeholderTextColor={C.textMuted} value={ui.datosDelivery.nombre} onChangeText={t => setUi(prev => ({ ...prev, datosDelivery: { ...prev.datosDelivery, nombre: t } }))} />
-                <TextInput style={s.modalInputCompact} placeholder="Dirección / Ref" placeholderTextColor={C.textMuted} value={ui.datosDelivery.direccion} onChangeText={t => setUi(prev => ({ ...prev, datosDelivery: { ...prev.datosDelivery, direccion: t } }))} />
+                <TextInput style={s.modalInputCompact} placeholder="Nombre / Dirección" placeholderTextColor={C.textMuted} value={ui.datosDelivery.nombre} onChangeText={t => setUi(prev => ({ ...prev, datosDelivery: { ...prev.datosDelivery, nombre: t } }))} />
                 <TextInput style={s.modalInputCompact} placeholder="Teléfono (Opcional)" placeholderTextColor={C.textMuted} value={ui.datosDelivery.telefono} onChangeText={t => setUi(prev => ({ ...prev, datosDelivery: { ...prev.datosDelivery, telefono: t } }))} keyboardType="phone-pad" />
                 <Touchable style={[s.btnPrimary, {backgroundColor: C.primary}]} onPress={confirmarDatosDelivery}><Text style={s.btnPrimaryText}>Confirmar Envío</Text></Touchable>
                 <Touchable style={s.btnSecondary} onPress={() => setUi(prev => ({ ...prev, modalDelivery: false }))}><Text style={s.btnSecondaryText}>Cancelar</Text></Touchable>
@@ -1256,33 +1344,59 @@ export default function App() {
           <View style={s.navbar}>
             <Text style={s.navBrand}>Calletano</Text>
             <View style={s.navRight}>
-              <View style={[s.statusPill, sys.conectado ? s.statusPillOn : s.statusPillOff]}>
+              <View style={[s.statusPill, { backgroundColor: sys.conectado ? 'rgba(16, 185, 129, 0.08)' : 'rgba(215, 38, 61, 0.08)', borderColor: sys.conectado ? 'rgba(16, 185, 129, 0.3)' : 'rgba(215, 38, 61, 0.3)' }]}>
                 <View style={[s.statusDot, { backgroundColor: sys.conectado ? C.success : C.danger }]} />
                 <Text style={s.statusPillText} numberOfLines={1}>{sys.serverStatus}</Text>
               </View>
-              <Touchable onPress={cerrarSesion} style={s.cfgIconBtn}><Feather name="log-out" size={20} color={C.surface} /></Touchable>
+              <Touchable onPress={club.abrirClub} style={s.cfgIconBtn} accessibilityLabel="Club Calletano" accessibilityRole="button"><Feather name="credit-card" size={20} color={C.surface} /></Touchable>
+              <Touchable onPress={cerrarSesion} style={s.cfgIconBtn} accessibilityLabel="Cerrar sesión" accessibilityRole="button"><Feather name="log-out" size={20} color={C.surface} /></Touchable>
             </View>
           </View>
 
-          <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: 14, paddingBottom: 32 }} contentInsetAdjustmentBehavior="automatic">
+          <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: PADDING, paddingBottom: 32 }} contentInsetAdjustmentBehavior="automatic">
             {elRestauranteEstaCerrado ? (
                <View style={{backgroundColor: C.dangerSoft, padding: 30, borderRadius: 16, alignItems: 'center', marginTop: 20, borderWidth: 1, borderColor: C.danger}}>
                   <Feather name="lock" size={40} color={C.danger} style={{marginBottom: 10}} />
-                  <Text style={{color: C.danger, fontSize: 18, fontWeight: '800', textAlign: 'center'}}>RESTAURANTE CERRADO</Text>
-                  <Text style={{color: C.danger, textAlign: 'center', marginTop: 10, fontWeight: '600'}}>El administrador ha cerrado el sistema de comandas por hoy.</Text>
+                  <Text style={{color: C.danger, fontSize: 18, fontWeight: '800', textAlign: 'center'}}>RESTAURANTE CERRADO</Text>                    <Text style={{color: C.danger, textAlign: 'center', marginTop: 10, fontWeight: '600'}}>El administrador ha cerrado el sistema de comandas por hoy.</Text>
                </View>
             ) : (
               <>
                 <Text style={s.mesasSectionLabel}>SALÓN - Selecciona una mesa</Text>
-                <View style={s.mesasGrid}>
-                  {mesasOrdenadas.map(mesa => {
+                <View style={[s.mesasGrid, { justifyContent: 'space-between' }]}>
+                  {mesasSnakeOrder.map((mesa: any) => {
                     const ocupada = mesa.estado === 'ocupada';
+                    const totalMesa = mesa.total ?? 0;
+                    const cantItems = mesa.pedido?.length ?? 0;
+                    // 🟢 FIX RESPONSIVE: fuentes dinámicas para que nombre, cantidad y total nunca se corten
+                    const nombreMesa = formatMesaName(mesa.id);
+                    const tamanoNombre = nombreMesa.length > 14 ? 12 : nombreMesa.length > 9 ? 14 : 17;
+                    const textoTotal = `S/ ${totalMesa.toFixed(2)}`;
+                    const tamanoTotal = textoTotal.length > 10 ? 11 : 12;
                     return (
-                      <Touchable key={mesa.id} style={[s.mesaCard, ocupada && s.mesaCardOcupada]} onPress={() => abrirMesa(mesa)}>
+                      <Touchable key={mesa.id} style={[s.mesaCard, { width: CARD_WIDTH }, ocupada && s.mesaCardOcupada]} onPress={() => abrirMesa(mesa)}>
                         <View style={[s.mesaCardBar, { backgroundColor: ocupada ? C.danger : C.gold }]} />
-                        <Text style={[s.mesaCardNombre, { color: ocupada ? C.textDark : C.gold }]} numberOfLines={1}>{formatMesaName(mesa.id)}</Text>
-                        <View style={[s.mesaCardBadge, { backgroundColor: ocupada ? C.dangerSoft : C.goldSoft }]}><Text style={[s.mesaCardBadgeText, { color: ocupada ? C.danger : C.gold }]}>{ocupada ? 'Ocupada' : 'Libre'}</Text></View>
-                        <View style={s.mesaCardFooter}><Text style={s.mesaCardItems}>{mesa.pedido?.length ?? 0} ítems</Text><Text style={[s.mesaCardTotal, mesa.total > 0 && s.mesaCardTotalActivo]}>S/ {(mesa.total ?? 0).toFixed(2)}</Text></View>
+                        <View style={{alignItems: 'center', marginTop: 16, marginBottom: 4}}>
+                          <MaterialCommunityIcons name={ocupada ? 'seat' : 'seat-outline'} size={28} color={ocupada ? C.danger : C.gold} />
+                        </View>
+                        <Text
+                          style={[s.mesaCardNombre, { marginTop: 4, marginBottom: 8, color: ocupada ? C.textDark : C.goldText, fontSize: tamanoNombre, lineHeight: tamanoNombre + 3 }]}
+                        >{nombreMesa}</Text>
+                        <View style={[s.mesaCardBadge, { backgroundColor: ocupada ? C.dangerSoft : C.goldSoft, borderColor: ocupada ? C.danger : C.gold }]}>
+                          <Text style={[s.mesaCardBadgeText, { color: ocupada ? C.danger : C.goldText }]}>{ocupada ? 'Ocupada' : 'Libre'}</Text>
+                        </View>
+                        <View style={[s.mesaCardFooter, cantItems === 0 && { borderTopWidth: 0 }]}>
+                          {cantItems > 0 ? (
+                            <>
+                              <View style={{flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1, flexShrink: 1, minWidth: 0}}>
+                                <MaterialCommunityIcons name="silverware" size={13} color={C.textMuted} />
+                                <Text style={s.mesaCardItems} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>{cantItems} plato{cantItems !== 1 ? 's' : ''}</Text>
+                              </View>
+                              <Text style={[s.mesaCardTotal, { fontSize: tamanoTotal, lineHeight: tamanoTotal + 3 }, totalMesa > 0 && s.mesaCardTotalActivo]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>{textoTotal}</Text>
+                            </>
+                          ) : (
+                            <Text style={{color: C.textMuted, fontSize: 11, fontStyle: 'italic', flex: 1, textAlign: 'center'}}>Sin pedidos</Text>
+                          )}
+                        </View>
                       </Touchable>
                     );
                   })}
@@ -1294,118 +1408,333 @@ export default function App() {
           </ScrollView>
         </>
       )}
-    </View>
+
+      {/* 🟢 MODAL: SELECCIÓN DE BEBIDA MODO DOMINGO MOZO - TOQUE INDIVIDUAL + QUITAR */}
+      <Modal visible={ui.modalBebidaDomingo} transparent animationType="fade">
+        <View style={s.modalOverlay}>
+          <View style={s.modalCard}>
+            <Text style={[s.modalTitle, {textAlign: 'center'}]}>Asignar Bebidas</Text>
+            {(() => {
+              // 🐛 FIX: solo cuentan almuerzos REALES (es_modo_domingo + categoría segundos)
+              const totalAlm = carrito
+                .filter((i: any) => i.es_modo_domingo && ['segundos', 'segundo'].includes(String(i.categoria || '').toLowerCase().trim()))
+                .reduce((sum: number, i: any) => sum + i.cantidad, 0);
+              const totalBeb = carrito.filter((i: any) => i.isMenuDrink).reduce((sum: number, i: any) => sum + i.cantidad, 0);
+              const pendientes = totalAlm - totalBeb;
+              const bebidasAsignadas = carrito.filter(i => i.isMenuDrink).reduce((acc: any, i) => {
+                const exist = acc.find((a: any) => a.nombre === i.nombre);
+                if (exist) exist.cantidad += i.cantidad;
+                else acc.push({ nombre: i.nombre, cantidad: i.cantidad });
+                return acc;
+              }, []);
+              
+              if (pendientes === 0 && bebidasAsignadas.length === 0) {
+                return (
+                  <>
+                    <Text style={[s.modalSubtitle, {textAlign: 'center', marginBottom: 20}]}>
+                      No hay almuerzos en el carrito.
+                    </Text>
+                    <Touchable style={s.btnSecondary} onPress={() => setUi(prev => ({ ...prev, modalBebidaDomingo: false }))}>
+                      <Text style={s.btnSecondaryText}>Cerrar</Text>
+                    </Touchable>
+                  </>
+                );
+              }
+              
+              return (
+                <>
+                  {/* ─── ASIGNAR NUEVAS ─── */}
+                  {pendientes > 0 && (
+                    <>
+                      <Text style={[s.modalSubtitle, {textAlign: 'center', marginBottom: 10}]}>
+                        Quedan <Text style={{fontWeight: '800', fontSize: 20, color: C.danger}}>{pendientes}</Text> almuerzo(s) sin bebida.
+                        {'\n'}Toca una bebida para asignarla al siguiente:
+                      </Text>
+                      <Touchable style={[s.btnPrimary, {backgroundColor: '#F4C430', marginBottom: 10, borderWidth: 2, borderColor: '#D4A843'}]} onPress={() => asignarBebidasAlmuerzos('INKA COLA 296ML')}>
+                        <Text style={[s.btnPrimaryText, {color: '#120B06'}]}>INKA COLA 296ML</Text>
+                      </Touchable>
+                      <Touchable style={[s.btnPrimary, {backgroundColor: C.danger, marginBottom: 10}]} onPress={() => asignarBebidasAlmuerzos('COCA COLA 296ML')}>
+                        <Text style={s.btnPrimaryText}>COCA COLA 296ML</Text>
+                      </Touchable>
+                      <Touchable style={[s.btnPrimary, {backgroundColor: C.bg, borderWidth: 2, borderColor: C.border, marginBottom: 12}]} onPress={() => asignarBebidasAlmuerzos('REFRESCO DEL DÍA')}>
+                        <Text style={[s.btnPrimaryText, {color: C.textDark}]}>REFRESCO DEL DÍA</Text>
+                      </Touchable>
+                    </>
+                  )}
+
+                  {pendientes === 0 && (
+                    <Text style={[s.modalSubtitle, {textAlign: 'center', marginBottom: 14, color: C.successDark, fontWeight: '800'}]}>
+                      ✅ Todas las bebidas están asignadas.
+                    </Text>
+                  )}
+
+                  {/* ─── BEBIDAS YA ASIGNADAS ─── */}
+                  {bebidasAsignadas.length > 0 && (
+                    <>
+                      <View style={{height: 1, backgroundColor: C.border, marginVertical: 8}} />
+                      <Text style={{fontSize: 12, fontWeight: '800', color: C.textMuted, marginBottom: 8, textAlign: 'center', textTransform: 'uppercase'}}>
+                        Bebidas asignadas (toca ✕ para cambiar)
+                      </Text>
+                      {bebidasAsignadas.map((b: any) => (
+                        <View key={b.nombre} style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: C.surface, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 8, marginBottom: 6, borderWidth: 1, borderColor: C.border}}>
+                          <Text style={{fontWeight: '700', fontSize: 15, color: C.textDark}}>
+                            {b.nombre} <Text style={{color: C.primary, fontWeight: '800'}}>×{b.cantidad}</Text>
+                          </Text>
+                          <Touchable 
+                            onPress={() => removerBebidaAsignada(b.nombre)}
+                            style={{backgroundColor: C.dangerSoft, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center'}}
+                            accessibilityLabel={`Quitar bebida ${b.nombre}`} accessibilityRole="button"
+                          >
+                            <Feather name="x" size={18} color={C.danger} />
+                          </Touchable>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  {/* ─── BOTONES DE ACCIÓN ─── */}
+                  {pendientes === 0 ? (
+                    <Touchable style={[s.btnPrimary, {marginTop: 12}]} onPress={() => { setUi(prev => ({ ...prev, modalBebidaDomingo: false })); enviarComanda(); }}>
+                      <Text style={s.btnPrimaryText}>Listo ✓</Text>
+                    </Touchable>
+                  ) : (
+                    <Touchable style={s.btnSecondary} onPress={() => setUi(prev => ({ ...prev, modalBebidaDomingo: false }))}>
+                      <Text style={s.btnSecondaryText}>Continuar después</Text>
+                    </Touchable>
+                  )}
+                </>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+
+          {/* 🆕 Modal Historial de Cambios */}
+          <Modal visible={ui.modalHistorialCambios} transparent animationType="fade">
+            <View style={s.modalOverlay}>
+              <View style={[s.modalCard, {maxHeight: '70%'}]}>
+                <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16}}>
+                  <View style={{flexDirection: 'row', alignItems: 'center', gap: 8}}>
+                    <Feather name="rotate-ccw" size={18} color={C.danger} />
+                    <Text style={s.modalTitle}>Cambios de Platos</Text>
+                  </View>
+                  <Touchable onPress={() => setUi(prev => ({ ...prev, modalHistorialCambios: false }))} style={{padding: 8}} accessibilityLabel="Cerrar historial de cambios" accessibilityRole="button">
+                    <Feather name="x" size={22} color={C.textMuted} />
+                  </Touchable>
+                </View>
+                {(() => {
+                  const cambios = obtenerHistorialCambios(mozo.mesaActiva?.pedido || []);
+                  if (cambios.length === 0) {
+                    return (
+                      <View style={{alignItems: 'center', padding: 30}}>
+                        <Feather name="rotate-ccw" size={40} color={C.textMuted} style={{opacity: 0.3, marginBottom: 12}} />
+                        <Text style={{color: C.textMuted, fontSize: 14, fontWeight: '600', textAlign: 'center'}}>No hay cambios de platos registrados en esta mesa.</Text>
+                      </View>
+                    );
+                  }
+                  return (
+                    <ScrollView style={{maxHeight: 400}}>
+                      {cambios.map((c: any, idx: number) => (
+                        <View key={idx} style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          paddingVertical: 12,
+                          borderBottomWidth: idx < cambios.length - 1 ? 1 : 0,
+                          borderBottomColor: C.border
+                        }}>
+                          <View style={{flex: 1}}>
+                            <Text style={{fontSize: 14, fontWeight: '600', color: C.danger, textDecorationLine: 'line-through'}}>
+                              {c.platoOriginal}
+                            </Text>
+                          </View>
+                          <Feather name="arrow-right" size={16} color={C.gold} style={{marginHorizontal: 12}} />
+                          <View style={{flex: 1}}>
+                            <Text style={{fontSize: 14, fontWeight: '700', color: C.successDark}}>
+                              {c.platoNuevo}
+                            </Text>
+                          </View>
+                          {c.categoria && (
+                            <View style={{backgroundColor: C.bg, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, marginLeft: 8}}>
+                              <Text style={{fontSize: 12, fontWeight: '700', color: C.textMuted, textTransform: 'uppercase'}}>{c.categoria}</Text>
+                            </View>
+                          )}
+                        </View>
+                      ))}
+                    </ScrollView>
+                  );
+                })()}
+                <Touchable style={[s.btnSecondary, {marginTop: 12}]} onPress={() => setUi(prev => ({ ...prev, modalHistorialCambios: false }))}>
+                  <Text style={s.btnSecondaryText}>Cerrar</Text>
+                </Touchable>
+              </View>
+            </View>
+          </Modal>
+
+          {/* 🎫 CLUB CALLETANO — Escáner de visitas de clientes */}
+          <Modal visible={club.modal} transparent animationType="fade" onRequestClose={club.cerrarClub}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+              <View style={[s.modalCard, { width: '92%', maxWidth: 560 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <Text style={[s.modalTitle, { marginBottom: 0 }]}>🎫 Club Calletano</Text>
+                  <Touchable onPress={club.cerrarClub} style={{ padding: 8 }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }} accessibilityLabel="Cerrar club" accessibilityRole="button">
+                    <Feather name="x" size={24} color={C.textMuted} />
+                  </Touchable>
+                </View>
+
+                {/* ── VISTA: ESCANEAR ── */}
+                {club.vista === 'escanear' && (
+                  <>
+                    <Text style={[s.modalSubtitle, { marginBottom: 12 }]}>
+                      Escanea el QR de la tarjeta del cliente para registrar su visita.
+                    </Text>
+
+                    {/* Cámara (no disponible en web) */}
+                    {Platform.OS !== 'web' &&
+                      (cameraPermission?.granted ? (
+                        <View style={{ borderRadius: 16, overflow: 'hidden', marginBottom: 16, height: 240, backgroundColor: C.bg }}>
+                          <CameraView
+                            style={{ flex: 1 }}
+                            facing="back"
+                            barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+                            onBarcodeScanned={({ data }) => club.procesarEscaneo(data)}
+                          />
+                        </View>
+                      ) : (
+                        <Touchable
+                          style={[s.btnPrimary, { backgroundColor: C.primary, marginBottom: 16 }]}
+                          onPress={() => { requestCameraPermission(); }}
+                        >
+                          <Feather name="camera" size={18} color={C.white} style={{ marginRight: 8 }} />
+                          <Text style={s.btnPrimaryText}>Permitir cámara</Text>
+                        </Touchable>
+                      ))}
+
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: C.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      O ingresa el documento manualmente
+                    </Text>
+                    <TextInput
+                      style={s.modalInputCompact}
+                      placeholder="DNI o CE (8 a 12 dígitos)"
+                      placeholderTextColor={C.textMuted}
+                      value={club.documentoManual}
+                      onChangeText={t => club.setDocumentoManual(t.replace(/[^\d]/g, ''))}
+                      keyboardType="number-pad"
+                      maxLength={12}
+                    />
+                    <Touchable
+                      style={[s.btnPrimary, { backgroundColor: C.gold }]}
+                      onPress={() => club.buscarTarjeta(club.documentoManual)}
+                      disabled={club.cargando || club.documentoManual.length < 8}
+                    >
+                      <Text style={[s.btnPrimaryText, { color: C.primary }]}>{club.cargando ? 'Buscando…' : 'Buscar tarjeta'}</Text>
+                    </Touchable>
+
+                    {club.mensaje !== '' && (
+                      <Text style={{ color: C.danger, fontWeight: '700', marginTop: 12, textAlign: 'center', fontSize: 13 }}>{club.mensaje}</Text>
+                    )}
+                  </>
+                )}
+
+                {/* ── VISTA: TARJETA DEL SOCIO ── */}
+                {club.vista === 'tarjeta' && club.miembro && (
+                  <>
+                    <View style={{ backgroundColor: '#0B3D4A', borderRadius: 18, padding: 20, marginBottom: 16 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+                        <View>
+                          <Text style={{ color: '#F6D35F', fontWeight: '900', letterSpacing: 1.5, fontSize: 13 }}>CLUB CALLETANO</Text>
+                          <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 12, marginTop: 2 }}>{club.sede}</Text>
+                        </View>
+                        <Text style={{ color: '#F6D35F', fontWeight: '900', fontSize: 22 }}>{clubProg?.porcentaje || 0}%</Text>
+                      </View>
+                      <Text style={{ color: '#fff', fontSize: 20, fontWeight: '800' }} numberOfLines={1}>{club.miembro.nombre}</Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 13, marginTop: 4, letterSpacing: 1 }}>
+                        {club.miembro.tipo_documento} {club.miembro.documento}
+                      </Text>
+                      <Text style={{ color: '#fff', fontWeight: '700', marginTop: 16, marginBottom: 6 }}>
+                        {club.miembro.visitas} de {club.meta} visitas
+                      </Text>
+                      <View style={{ height: 10, borderRadius: 99, backgroundColor: 'rgba(255,255,255,0.22)', overflow: 'hidden' }}>
+                        <View style={{ height: '100%', width: `${clubProg?.porcentaje || 0}%`, borderRadius: 99, backgroundColor: '#F6D35F' }} />
+                      </View>
+                    </View>
+
+                    {club.mensaje !== '' && (
+                      <Text style={{ color: C.danger, fontWeight: '700', marginBottom: 12, textAlign: 'center', fontSize: 13 }}>{club.mensaje}</Text>
+                    )}
+
+                    {club.yaVisitoHoy && (
+                      <View style={{ backgroundColor: C.dangerSoft, padding: 12, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: C.danger }}>
+                        <Text style={{ color: C.danger, fontWeight: '800', textAlign: 'center', fontSize: 13 }}>⚠️ Este cliente ya registró su visita hoy</Text>
+                        <Text style={{ color: C.danger, fontSize: 12, textAlign: 'center', marginTop: 4 }}>Solo se cuenta una visita por día en la misma sede.</Text>
+                      </View>
+                    )}
+
+                    {/* 💵 Consumo de comida de la mesa: la visita se registra solo si la boleta llega a S/ 80 */}
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: C.textMuted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Consumo de comida de la mesa (S/)
+                    </Text>
+                    <TextInput
+                      style={[s.modalInputCompact, { marginBottom: 4 }]}
+                      placeholder="Mínimo S/ 80 (menú, domingo o carta)"
+                      placeholderTextColor={C.textMuted}
+                      value={club.consumoMesa}
+                      onChangeText={t => club.setConsumoMesa(t.replace(',', '.').replace(/[^\d.]/g, ''))}
+                      keyboardType="decimal-pad"
+                    />
+                    <Text style={{ fontSize: 12, color: C.textMuted, marginBottom: 12 }}>
+                      Solo se registra la visita si la mesa suma S/ {CONSUMO_MINIMO} o más en comida (no cuentan bebidas ni envases).
+                    </Text>
+
+                    <Touchable
+                      style={[s.btnPrimary, { backgroundColor: (club.yaVisitoHoy || !consumoOk) ? C.border : C.successLight }]}
+                      onPress={club.sumarVisita}
+                      disabled={club.cargando || club.yaVisitoHoy || !consumoOk}
+                    >
+                      <Feather name="check-circle" size={18} color={(club.yaVisitoHoy || !consumoOk) ? C.textMuted : '#064E3B'} style={{ marginRight: 8 }} />
+                      <Text style={[s.btnPrimaryText, { color: (club.yaVisitoHoy || !consumoOk) ? C.textMuted : '#064E3B' }]}>
+                        {club.yaVisitoHoy ? 'Visita ya registrada hoy' : club.cargando ? 'Registrando…' : consumoOk ? 'SUMAR VISITA' : `Consumo mínimo: S/ ${CONSUMO_MINIMO}`}
+                      </Text>
+                    </Touchable>
+                    <Touchable style={s.btnSecondary} onPress={club.escanearOtro}>
+                      <Text style={s.btnSecondaryText}>Escanea otro cliente</Text>
+                    </Touchable>
+                  </>
+                )}
+
+                {/* ── VISTA: ÉXITO ── */}
+                {club.vista === 'exito' && (
+                  <>
+                    <View style={{ alignItems: 'center', marginVertical: 20 }}>
+                      <View style={{ width: 72, height: 72, borderRadius: 36, backgroundColor: C.successSoft, alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+                        <Feather name="check" size={40} color={C.success} />
+                      </View>
+                      <Text style={{ fontSize: 20, fontWeight: '800', color: C.textDark, textAlign: 'center' }}>¡Visita registrada! 🎉</Text>
+                      <Text style={{ fontSize: 14, color: C.textMuted, marginTop: 6, textAlign: 'center' }}>
+                        <Text style={{ fontWeight: '800', color: C.textDark }}>{club.miembro?.nombre}</Text>{' '}
+                        ahora tiene <Text style={{ fontWeight: '800', color: C.successDark }}>{club.visitasNuevas} de {club.meta} visitas</Text>.
+                      </Text>
+                      {club.visitasNuevas >= club.meta ? (
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: C.goldText, marginTop: 10, textAlign: 'center' }}>
+                          🏆 ¡El cliente completó sus visitas! Gana su premio en caja.
+                        </Text>
+                      ) : club.premio ? (
+                        <Text style={{ fontSize: 12, color: C.textMuted, marginTop: 10, textAlign: 'center' }}>
+                          Premio al completar {club.meta} visitas: {club.premio}.
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Touchable style={[s.btnPrimary, { backgroundColor: C.primary }]} onPress={club.escanearOtro}>
+                      <Text style={s.btnPrimaryText}>Escanear otro cliente</Text>
+                    </Touchable>
+                    <Touchable style={s.btnSecondary} onPress={club.cerrarClub}>
+                      <Text style={s.btnSecondaryText}>Cerrar</Text>
+                    </Touchable>
+                  </>
+                )}
+              </View>
+            </KeyboardAvoidingView>
+          </Modal>
+
+    </SafeAreaView>
   );
 }
-
-// ═══════════════════════════════════════════════════════════
-// ESTILOS 
-// ═══════════════════════════════════════════════════════════
-const PT = Platform.OS === 'android' ? RNStatusBar.currentHeight ?? 0 : 0;
-
-const s = StyleSheet.create({
-  safeAreaBlue: { flex: 1, backgroundColor: C.primary, paddingTop: PT },
-  scrollBase:   { flex: 1, backgroundColor: C.bg },
-  cfgScreen: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, backgroundColor: C.bg },
-  cfgCard: { backgroundColor: C.surface, borderRadius: 24, padding: 32, width: '100%', maxWidth: 380, borderWidth: 1, borderColor: C.borderFocus },
-  cfgLogoWrap: { marginBottom: 24, alignItems: 'center' },
-  cfgLogo:     { fontFamily: Platform.OS === 'ios' ? 'Georgia' : 'serif', fontSize: 32, fontWeight: '700', color: C.gold, letterSpacing: -0.5 },
-  cfgLogoSub:  { fontSize: 12, fontWeight: '800', letterSpacing: 0.5, color: C.textMuted, marginTop: 6 },
-  cfgDivider:  { height: 1, backgroundColor: C.border, marginBottom: 24 },
-  cfgLabel:    { fontSize: 12, fontWeight: '800', letterSpacing: 0.5, color: C.textMuted, marginBottom: 8, textTransform: 'uppercase' },
-  cfgInput: { backgroundColor: C.surface, color: C.textDark, fontSize: 18, fontWeight: '700', textAlign: 'center', letterSpacing: 1, borderRadius: 12, padding: 16, marginBottom: 20, borderWidth: 1, borderColor: C.borderFocus },
-  navbar: { backgroundColor: C.primary, height: 64, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, borderBottomWidth: 2, borderBottomColor: C.gold },
-  navBrand: { fontFamily: Platform.OS === 'ios' ? 'Georgia' : 'serif', fontSize: 24, fontWeight: '700', color: C.gold },
-  navTitle: { position: 'absolute', left: 0, right: 0, textAlign: 'center', fontFamily: Platform.OS === 'ios' ? 'Georgia' : 'serif', fontSize: 20, fontWeight: '700', color: C.surface, pointerEvents: 'none' },
-  navRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  navBackBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 8, marginLeft: -4 },
-  navBackText: { color: C.surface, fontWeight: '700', fontSize: 16, marginLeft: 2 },
-  statusPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 99, backgroundColor: C.primarySoft, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  statusPillText: { fontSize: 12, fontWeight: '700', color: C.surface, textTransform: 'uppercase', letterSpacing: 0.5 },
-  cfgIconBtn: { padding: 10 },
-  mesasSectionLabel: { fontSize: 12, fontWeight: '800', letterSpacing: 0.5, color: C.textMuted, marginBottom: 16, marginLeft: 4, textTransform: 'uppercase' },
-  mesasGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  mesaCard: { width: (SW - 40) / 2, backgroundColor: C.surface, borderRadius: 12, padding: 16, borderWidth: 1, borderColor: C.border, overflow: 'hidden' },
-  mesaCardOcupada: { backgroundColor: C.surface, borderColor: C.danger, borderWidth: 2 },
-  mesaCardBar: { position: 'absolute', top: 0, left: 0, right: 0, height: 4 },
-  mesaCardNombre: { fontSize: 24, fontWeight: '800', textAlign: 'center', marginTop: 16, marginBottom: 16 },
-  mesaCardBadge: { alignSelf: 'center', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, marginBottom: 12, borderWidth: 1 },
-  mesaCardBadgeText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.5, textTransform: 'uppercase' },
-  mesaCardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 12, borderTopWidth: 1, borderTopColor: C.border },
-  mesaCardItems: { fontSize: 12, color: C.textMuted, fontWeight: '700' },
-  mesaCardTotal: { fontSize: 14, fontWeight: '800', color: C.textMuted },
-  mesaCardTotalActivo: { color: C.primary, fontWeight: '800' },
-  emptyText: { color: C.textMuted, textAlign: 'center', marginTop: 40, fontSize: 14, fontWeight: '600' },
-  searchWrap: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: 12, paddingHorizontal: 16, marginBottom: 20, borderWidth: 1, borderColor: C.borderFocus },
-  searchIcon: { marginRight: 12 },
-  searchInput: { flex: 1, color: C.textDark, fontSize: 16, fontWeight: '600', paddingVertical: 16 },
-  searchClear: { padding: 8 },
-  quickGrid: { flexDirection: 'row', gap: 12, marginBottom: 16 },
-  quickBtn: { flex: 1, borderRadius: 12, padding: 16, alignItems: 'center', backgroundColor: C.surface, borderWidth: 1, borderColor: C.border },
-  quickBtnLabel: { color: C.primary, fontWeight: '800', fontSize: 14, marginBottom: 4 },
-  quickBtnPrice: { color: C.textMuted, fontWeight: '700', fontSize: 13 },
-  fueraCarta: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, backgroundColor: C.bg, borderRadius: 12, padding: 16, marginBottom: 24, borderWidth: 1, borderColor: C.borderFocus, borderStyle: 'dashed' },
-  fueraCartaText: { color: C.textDark, fontWeight: '700', fontSize: 14 },
-  yaPedidoCard: { backgroundColor: C.surface, borderRadius: 12, padding: 16, marginBottom: 24, borderWidth: 1, borderColor: C.border },
-  yaPedidoTitle: { fontSize: 12, fontWeight: '800', letterSpacing: 0.5, color: C.primary, marginLeft: 6, textTransform: 'uppercase' },
-  yaPedidoRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border },
-  yaPedidoItem: { fontSize: 14 },
-  seccionWrap: { marginBottom: 24 },
-  seccionTitle: { fontSize: 12, fontWeight: '800', letterSpacing: 0.5, color: C.textMuted, textTransform: 'uppercase', paddingBottom: 8, marginBottom: 12, borderBottomWidth: 1, borderBottomColor: C.border },
-  catLabel: { fontSize: 12, fontWeight: '800', color: C.primary, textTransform: 'uppercase', marginBottom: 12, marginTop: 4 },
-  platosGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  platoBtn: { width: (SW - 36) / 2, backgroundColor: C.surface, borderRadius: 12, padding: 16, borderWidth: 1, borderColor: C.border },
-  platoBtnBar: { position: 'absolute', top: 0, left: 0, right: 0, height: 3 },
-  platoNombre: { color: C.textDark, fontWeight: '700', fontSize: 14, lineHeight: 18, marginTop: 8, marginBottom: 8 },
-  platoPrecio: { fontWeight: '800', fontSize: 15 },
-  carritoSheet: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: C.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '55%', borderWidth: 1, borderColor: C.borderFocus },
-  carritoHandle: { alignItems: 'center', paddingTop: 12, paddingBottom: 12 },
-  carritoHandleBar: { width: 48, height: 4, backgroundColor: C.borderFocus, borderRadius: 99 },
-  carritoHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: C.border },
-  carritoHeaderTitle: { fontSize: 14, fontWeight: '800', color: C.textDark, textTransform: 'uppercase', letterSpacing: 0.5 },
-  carritoHeaderBadge: { backgroundColor: C.primary, width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  carritoHeaderBadgeText:{ color: C.surface, fontWeight: '800', fontSize: 13 },
-  carritoLista: { paddingHorizontal: 16, maxHeight: 200 },
-  carritoItem: { paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: C.border },
-  carritoItemRow1: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 },
-  carritoItemNombre:{ color: C.textDark, fontWeight: '700', fontSize: 15, flex: 1, lineHeight: 22 },
-  carritoItemNota: { color: C.danger, fontSize: 12, marginTop: 6, fontWeight: '600' },
-  carritoItemPrecio:{ color: C.textMuted, fontWeight: '800', fontSize: 15, marginLeft: 12 },
-  carritoItemRow2: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  modBtn: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: C.bg, borderWidth: 1, borderColor: C.border },
-  modBtnActiva: { backgroundColor: C.primary, borderColor: C.primary },
-  modBtnText: { color: C.textDark, fontWeight: '700', fontSize: 12, marginLeft: 6 },
-  modBtnTextActiva: { color: C.surface },
-  carritoControles: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  notaBtn: { width: 40, height: 40, borderRadius: 8, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.border },
-  qtyControls: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: 8, borderWidth: 1, borderColor: C.border },
-  qtyBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  qtyNumber: { color: C.textDark, fontWeight: '800', fontSize: 16, minWidth: 28, textAlign: 'center' },
-  eliminarBtn: { width: 40, height: 40, borderRadius: 8, backgroundColor: C.dangerSoft, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: C.dangerSoft },
-  carritoFooter: { padding: 16, borderTopWidth: 1, borderTopColor: C.border, backgroundColor: C.bg },
-  btnPrimary: { backgroundColor: C.primary, borderRadius: 12, padding: 16, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' },
-  btnPrimaryText: { color: C.surface, fontWeight: '800', fontSize: 15, textTransform: 'uppercase', letterSpacing: 0.5 },
-  btnSecondary: { padding: 16, alignItems: 'center', marginTop: 4 },
-  btnSecondaryText: { color: C.textMuted, fontWeight: '800', fontSize: 14, textTransform: 'uppercase', letterSpacing: 0.5 },
-  modalOverlay: { flex: 1, backgroundColor: C.overlay, justifyContent: 'center', alignItems: 'center' },
-  modalCard: { backgroundColor: C.surface, borderRadius: 24, padding: 24, width: '85%', borderWidth: 1, borderColor: C.borderFocus },
-  modalTitle: { fontSize: 20, fontWeight: '800', color: C.textDark, marginBottom: 8 },
-  modalSubtitle: { fontSize: 13, color: C.textMuted, marginBottom: 24, fontWeight: '600' },
-  modalInput: { backgroundColor: C.bg, color: C.textDark, borderRadius: 12, padding: 16, fontSize: 16, fontWeight: '500', marginBottom: 24, minHeight: 100, textAlignVertical: 'top', borderWidth: 1, borderColor: C.border },
-  modalInputCompact: { backgroundColor: C.bg, color: C.textDark, borderRadius: 12, padding: 16, fontSize: 16, fontWeight: '500', marginBottom: 12, borderWidth: 1, borderColor: C.border },
-  fabBtn: {
-    position: 'absolute', bottom: 24, right: 24,
-    backgroundColor: C.primary, width: 64, height: 64, borderRadius: 32,
-    justifyContent: 'center', alignItems: 'center', elevation: 8,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 4
-  },
-  fabBadge: {
-    position: 'absolute', top: -4, right: -4,
-    backgroundColor: C.danger, width: 28, height: 28, borderRadius: 14,
-    justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: C.surface
-  },
-  fabBadgeText: { color: C.surface, fontWeight: '800', fontSize: 13 },
-  badgeComanda: { position: 'absolute', top: -8, right: -8, backgroundColor: C.success, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, borderWidth: 2, borderColor: C.surface, elevation: 2, shadowColor: '#000', shadowOffset: {width: 0, height: 2}, shadowOpacity: 0.2, shadowRadius: 2, zIndex: 10 },
-  badgeComandaText: { color: C.surface, fontWeight: '800', fontSize: 10, textTransform: 'uppercase' },
-});

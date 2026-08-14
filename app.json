@@ -3,7 +3,7 @@
     "name": "POS-Mozo",
     "slug": "mozo-tablet",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./app/assets/images/icon.png",
     "scheme": "mozotablet",
     "userInterfaceStyle": "automatic",
@@ -45,11 +45,14 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "expo-font",
+      "expo-dev-client",
+      ["expo-camera", { "cameraPermission": "Permitir a Calletano usar la cámara para escanear el QR del Club de clientes." }],
+      ["expo-navigation-bar", { "hidden": true }]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "router": {},

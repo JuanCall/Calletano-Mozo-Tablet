@@ -17,6 +17,15 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+*.keystore
+
+# 🔐 Claves de firma de producción (¡NUNCA subir a git!)
+/keys/
+keystore.properties
+
+# Logs de build (EAS / Gradle)
+eas-build*.log
+gradle-build*.log
 
 # Metro
 .metro-health-check*
