@@ -38,14 +38,7 @@
           }
         }
       ],
-      [
-        "expo-build-properties",
-        {
-          "android": {
-            "usesCleartextTraffic": true
-          }
-        }
-      ],
+      "./plugins/with-network-security-config",
       "expo-font",
       "expo-dev-client",
       ["expo-camera", { "cameraPermission": "Permitir a Calletano usar la cámara para escanear el QR del Club de clientes." }],

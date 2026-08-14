@@ -145,7 +145,7 @@ export default function useClub(ipServidor: string = '') {
 
     try {
       const res = await axios.post(
-        `http://${ipServidor}:3001/api/club/miembros/${miembro.documento}/visita`,
+        `https://${ipServidor}:3001/api/club/miembros/${miembro.documento}/visita`,
         { sede, consumo_comida: consumo },
         { timeout: 8000, headers: { 'x-club-key': CLUB_API_KEY } },
       );

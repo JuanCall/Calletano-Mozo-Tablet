@@ -103,7 +103,7 @@ export default function useClubAdmin(ipServidor: string = '') {
     if (!ipServidor) return;
     setCargandoStats(true);
     try {
-      const res = await axios.get(`http://${ipServidor}:3001/api/club/estadisticas`, {
+      const res = await axios.get(`https://${ipServidor}:3001/api/club/estadisticas`, {
         timeout: 8000,
         headers: { 'x-club-key': CLUB_API_KEY },
       });
@@ -131,7 +131,7 @@ export default function useClubAdmin(ipServidor: string = '') {
     }
     setRegistrando(true);
     try {
-      const res = await axios.post(`http://${ipServidor}:3001/api/club/miembros`, { documento: docNum }, {
+      const res = await axios.post(`https://${ipServidor}:3001/api/club/miembros`, { documento: docNum }, {
         timeout: 15000,
         headers: { 'x-club-key': CLUB_API_KEY },
       });

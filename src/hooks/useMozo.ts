@@ -352,7 +352,7 @@ export default function useMozo(ipServidor: string, appData: any) {
     }
 
     try {
-      await axios.post(`http://${ipServidor}:3001/api/pedidos`, { 
+      await axios.post(`https://${ipServidor}:3001/api/pedidos`, { 
         mesa: mozo.mesaActiva.id, items: carrito, nota_general: mozo.mesaActiva.nota_general || '' 
       });
       setCarrito([]);

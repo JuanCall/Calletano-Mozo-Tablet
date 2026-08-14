@@ -32,7 +32,10 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
 
   useEffect(() => {
     if (!sys.ipServidor || sys.modoConfig) return;
-    const API_URL = `http://${sys.ipServidor}:3001`;
+    // 🔒 HTTPS: el backend escucha SOLO por TLS (certificado autofirmado). La
+    // CA (tls/ca.crt del equipo de la caja) debe instalarse una vez en la
+    // tablet: Settings → Seguridad → Instalar certificado → Certificado de CA.
+    const API_URL = `https://${sys.ipServidor}:3001`;
     setSys(prev => ({ ...prev, serverStatus: 'Conectando...' }));
     
     // 🛡️ Socket.IO con autenticación: el handshake envía el token compartido
@@ -100,7 +103,7 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
   const handleMozoLogin = async () => {
     setAuthData(prev => ({ ...prev, error: '' }));
     try {
-      const API_URL = `http://${sys.ipServidor}:3001`;
+      const API_URL = `https://${sys.ipServidor}:3001`;
       await axios.get(`${API_URL}/api/mesas`, { timeout: 3000 });
       // Forzar rol como mozo siempre
       setAuthData(prev => ({ ...prev, usuarioActivo: { username: 'Mozo', rol: 'mozo' } }));
@@ -113,7 +116,7 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
     setAuthData(prev => ({ ...prev, error: '' }));
     try {
       // 1. INTENTO LOCAL (Busca la Caja por Wi-Fi)
-      const res = await axios.post(`http://${sys.ipServidor}:3001/api/login`, { username: authData.username, password: authData.password }, { timeout: 3000 });
+      const res = await axios.post(`https://${sys.ipServidor}:3001/api/login`, { username: authData.username, password: authData.password }, { timeout: 3000 });
       setAuthData(prev => ({ ...prev, usuarioActivo: res.data.user }));
       
       // 🟢 Si es admin, también autenticar con Firebase para poder leer Firestore (radar, reportes)
@@ -166,7 +169,7 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
       // 🛎️ Si hay conexión local, notificar al backend para que envíe push
       if (sys.ipServidor && !sys.serverStatus.includes('remoto')) {
         try {
-          await axios.post(`http://${sys.ipServidor}:3001/api/admin/estado`, nuevoEstado, { timeout: 3000 });
+          await axios.post(`https://${sys.ipServidor}:3001/api/admin/estado`, nuevoEstado, { timeout: 3000 });
         } catch (_) { /* El cambio ya se guardó en Firestore directo */ }
       }
       

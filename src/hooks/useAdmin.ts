@@ -371,7 +371,7 @@ export default function useAdmin(appData: any, setAppData: any, ipServidor: stri
     // ✅ Actualizar estado local inmediatamente para que se refleje en Radar y Gastos
     if (ipServidor && ipServidor !== 'localhost') {
       try {
-        const res = await axios.post(`http://${ipServidor}:3001/api/gastos`, payload, { timeout: 3000 });
+        const res = await axios.post(`https://${ipServidor}:3001/api/gastos`, payload, { timeout: 3000 });
         // ✅ Construir gasto local para actualizar estado sin esperar refresh
         const firestoreId = res.data.firestoreId || `GAS-${Date.now().toString(36).toUpperCase()}-${fechaLimpia}`;
         const gastoLocal = {
@@ -531,7 +531,7 @@ export default function useAdmin(appData: any, setAppData: any, ipServidor: stri
       // es un no-op; lo mantenemos solo por compatibilidad (fire-and-forget).
       if (ipServidor) {
         axios
-          .post(`http://${ipServidor}:3001/api/club/notificar-menu`, {}, { timeout: 5000, headers: { 'x-club-key': CLUB_API_KEY } })
+          .post(`https://${ipServidor}:3001/api/club/notificar-menu`, {}, { timeout: 5000, headers: { 'x-club-key': CLUB_API_KEY } })
           .catch(() => {
             // Silencioso: el correo es un extra, el menú ya quedó publicado
           });
