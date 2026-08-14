@@ -91,14 +91,17 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
   };
 
   // 🆕 Login simple para mozo (sin PIN)
+  // 🔐 SEGURIDAD: ya NO envía credenciales hardcodeadas (caja/caja) por HTTP
+  // plano — un sniffer de la LAN podría capturarlas. El rol del mozo es solo
+  // de UI (se fuerza 'mozo' en el cliente), así que basta con verificar que la
+  // caja responde: health-check contra /api/mesas (endpoint público de solo
+  // lectura). El backend rechaza conexiones sin el token compartido, que ya
+  // se inyecta vía el interceptor de apiClient.ts.
   const handleMozoLogin = async () => {
     setAuthData(prev => ({ ...prev, error: '' }));
     try {
       const API_URL = `http://${sys.ipServidor}:3001`;
-      const _res = await axios.post(`${API_URL}/api/login`, {
-        username: 'caja',
-        password: 'caja'
-      }, { timeout: 3000 });
+      await axios.get(`${API_URL}/api/mesas`, { timeout: 3000 });
       // Forzar rol como mozo siempre
       setAuthData(prev => ({ ...prev, usuarioActivo: { username: 'Mozo', rol: 'mozo' } }));
     } catch (e: any) {

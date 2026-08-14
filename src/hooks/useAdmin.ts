@@ -5,15 +5,13 @@ import axios from 'axios';
 import { collection, doc, getDoc, getDocs, setDoc, query, where, orderBy, limit, Timestamp, deleteDoc } from 'firebase/firestore';
 import { db } from '../firebase-config';
 import { obtenerFechaActualLocal, generarId, pad5 } from '../utils/helpers';
+import { CLUB_API_KEY } from '../lib/apiClient';
 
 const CACHE_TTL = 30 * 1000; // 30 segundos antes de re-fetchear (reporte diario)
 const _CACHE_RADAR_TTL = 5 * 60 * 1000; // 5 minutos para el radar mensual (evita lecturas frecuentes)
 const CACHE_RADAR_KEY = 'cache_radar_mensual';
 
 const _MESES_ES = ['ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO', 'JULIO', 'AGOSTO', 'SEPTIEMBRE', 'OCTUBRE', 'NOVIEMBRE', 'DICIEMBRE'];
-
-// 🛡️ Token compartido del Club Calletano — debe coincidir con CLUB_API_KEY del backend
-const CLUB_API_KEY = 'calletano-club-key-2026';
 
 export default function useAdmin(appData: any, setAppData: any, ipServidor: string = 'localhost') {
   const [admin, setAdmin] = useState({

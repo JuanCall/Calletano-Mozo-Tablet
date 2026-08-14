@@ -12,14 +12,12 @@ import { collection, query, orderBy, limit, getDocs, doc, runTransaction, server
 import { db } from '../firebase-config';
 import { obtenerFechaActualLocal } from '../utils/helpers';
 import { calcularProgreso, filtrarSocios } from '../utils/club';
+import { CLUB_API_KEY } from '../lib/apiClient';
 
 // ⚙️ Valores FIJOS del club (ya no se leen de Firestore clubConfig)
 // 🎫 Diseño final (tarjeta única): 10 visitas para el premio
 const META_VISITAS = 10;
 const SEDE = 'Máncora';
-
-// 🛡️ Token compartido del Club — debe coincidir con CLUB_API_KEY del backend
-const CLUB_API_KEY = 'calletano-club-key-2026';
 
 export default function useClubAdmin(ipServidor: string = '') {
   const [modal, setModal] = useState(false);

@@ -19,6 +19,7 @@ import { obtenerFechaActualLocal } from '../utils/helpers';
 import {
   normalizarDocumento, validarDocumento, extraerCodigoTarjeta, esCodigoLegacy, yaRegistroVisitaHoy,
 } from '../utils/club';
+import { CLUB_API_KEY } from '../lib/apiClient';
 
 export type VistaClub = 'escanear' | 'tarjeta' | 'exito';
 
@@ -31,9 +32,6 @@ const SEDE = 'Máncora';
 // mesa llega a S/ 80 en COMIDA (menú + almuerzo de domingo + carta; sin bebidas
 // ni envases). El backend lo valida igual (no se puede saltar desde la app).
 export const CONSUMO_MINIMO = 80;
-
-// 🛡️ Token compartido del Club — debe coincidir con CLUB_API_KEY del backend
-const CLUB_API_KEY = 'calletano-club-key-2026';
 
 export default function useClub(ipServidor: string = '') {
   const [modal, setModal] = useState(false);
