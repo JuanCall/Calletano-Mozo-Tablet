@@ -29,6 +29,7 @@ gradle-build*.log
 
 # Metro
 .metro-health-check*
+metro.log
 
 # debug
 npm-debug.*
