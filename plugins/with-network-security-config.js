@@ -28,14 +28,22 @@ const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins'
 const fs = require('fs');
 const path = require('path');
 
-const CA_SOURCE = path.resolve(__dirname, '../../tls/ca.crt');
+// La CA se busca en este orden:
+//   1. mozo-tablet/tls/ca.crt  — copia DENTRO del proyecto (viaja en el upload
+//      de EAS; es la que se incrusta en el APK). ¡Mantener sincronizada con la
+//      CA real del backend (tls/ca.crt de la raíz del monorepo)!
+//   2. ../../tls/ca.crt        — raíz del monorepo (dev local). Fuera del
+//      proyecto de EAS, así que NO llega a los builds en la nube.
+const CA_LOCAL = path.resolve(__dirname, '../tls/ca.crt');
+const CA_LEGACY = path.resolve(__dirname, '../../tls/ca.crt');
+const CA_SOURCE = fs.existsSync(CA_LOCAL) ? CA_LOCAL : (fs.existsSync(CA_LEGACY) ? CA_LEGACY : null);
 const CA_RAW_NAME = 'calletano_ca'; // nombre de recurso Android (res/raw/calletano_ca.crt)
 
 // La CA se incrusta SOLO si existe el archivo. Si no (p. ej. build de CI o EAS
 // sin la carpeta tls/ disponible), el XML NO referencia @raw/calletano_ca:
 // un recurso inexistente rompería el build con un error AAPT
 // ("resource raw/calletano_ca not found").
-const tieneCA = () => fs.existsSync(CA_SOURCE);
+const tieneCA = () => !!CA_SOURCE && fs.existsSync(CA_SOURCE);
 
 const XML_MAIN = `<?xml version="1.0" encoding="utf-8"?>
 <!-- Generado por plugins/with-network-security-config.js (Expo config plugin). -->
@@ -81,7 +89,7 @@ function copiarCA(platformProjectRoot) {
   } else {
     // No hay CA disponible (ej: build de CI/EAS sin la carpeta tls/): el XML
     // tampoco la referencia, así que el build no se rompe (ver XML_MAIN/XML_DEBUG).
-    console.warn('[with-network-security-config] ⚠️ No se encontró ../tls/ca.crt — el APK NO confiará en el HTTPS autofirmado de la caja.');
+    console.warn('[with-network-security-config] ⚠️ No se encontró la CA (tls/ca.crt del proyecto ni ../../tls/ca.crt) — el APK NO confiará en el HTTPS autofirmado de la caja.');
   }
 }
 
