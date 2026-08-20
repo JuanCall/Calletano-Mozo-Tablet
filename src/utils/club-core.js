@@ -11,7 +11,7 @@ export const CLUB_CONFIG = {
     visitas_para_premio: 10,
     premio: '1 plato de carta personal',
     consumo_minimo: 80,
-    condiciones: 'La visita se registra cuando tu boleta suma S/ 80 o más (menú del día, almuerzo de domingo o platos de carta; bebidas y envases no suman). Cuando la mesa llega al mínimo, una persona de la mesa registra su visita. Máximo 1 visita por día.',
+    condiciones: 'La visita se registra cuando tu boleta suma S/ 80 o más (menú del día, almuerzo de domingo, platos de carta y bebidas; solo envases/taper no suman). Cuando la mesa llega al mínimo, una persona de la mesa registra su visita. Máximo 1 visita por día.',
 };
 
 // Página web donde el socio consulta su progreso (destino del QR).

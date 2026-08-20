@@ -29,8 +29,8 @@ const META_VISITAS = 10;
 const PREMIO = '1 plato de carta personal';
 const SEDE = 'Máncora';
 // 💵 Consumo mínimo por boleta (tarjeta única): la visita se registra SOLO si la
-// mesa llega a S/ 80 en COMIDA (menú + almuerzo de domingo + carta; sin bebidas
-// ni envases). El backend lo valida igual (no se puede saltar desde la app).
+// mesa llega a S/ 80 (menú + almuerzo de domingo + platos de carta + bebidas;
+// solo envases/taper no suman). El backend lo valida igual (no se puede saltar desde la app).
 export const CONSUMO_MINIMO = 80;
 
 export default function useClub(ipServidor: string = '') {
@@ -132,7 +132,7 @@ export default function useClub(ipServidor: string = '') {
     // (el backend valida igual, esto es solo feedback inmediato en la tablet)
     const consumo = parseFloat(consumoMesa) || 0;
     if (consumo < CONSUMO_MINIMO) {
-      setMensaje(`El consumo de comida de la mesa no llega al mínimo de S/ ${CONSUMO_MINIMO}.`);
+      setMensaje(`El consumo de la mesa no llega al mínimo de S/ ${CONSUMO_MINIMO}.`);
       setCargando(false);
       return;
     }
