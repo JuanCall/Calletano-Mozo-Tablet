@@ -14,7 +14,9 @@ export default function useMozo(ipServidor: string, appData: any) {
     modalFueraCarta: false, fueraCartaItem: { id: '', nombre: '', precio: '' },
     modalDelivery: false, datosDelivery: { nombre: '', telefono: '', idx: null as number | null, mod: '' },
     modalBebidaDomingo: false, platoPendienteBebida: null as any,
-    modalHistorialCambios: false
+    modalHistorialCambios: false,
+    // 🍽️ Modal para elegir porción de un plato con dos precios (personal/fuente, vaso/jarra)
+    modalVariante: false, grupoVariante: null as any
   });
 
   // 🟢 Calcular bebidas pendientes de asignar en modo domingo.

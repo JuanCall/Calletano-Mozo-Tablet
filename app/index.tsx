@@ -11,6 +11,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 // 🟢 TUS IMPORTACIONES MODULARES
 import { C, s, CAT } from '../src/styles/theme';
 import { obtenerFechaActualLocal, formatMesaName, modLabelText, obtenerHistorialCambios } from '../src/utils/helpers';
+import { agruparCartaCompleta, resolverMasPedidos, etiquetaVariante } from '../src/utils/carta';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import useAppSystem from '../src/hooks/useAppSystem';
 import useAdmin from '../src/hooks/useAdmin';
@@ -41,6 +42,44 @@ const Touchable = ({ style, activeOpacity = 0.7, children, disabled, onPress, hi
     {children}
   </Pressable>
 );
+
+// 🍽️ Tarjeta de plato del catálogo. La comparten la CARTA y la sección MÁS PEDIDOS
+// para que ambas se vean y se comporten exactamente igual.
+const PlatoCard = ({ plato, ancho, color, tintBg, onPress, cantEnCarrito, agotado, pocoStock, stockVisible, esDoble }: any) => {
+  const nombrePlato = plato?.nombre || '';
+  const tamanoNombre = nombrePlato.length > 34 ? 11 : nombrePlato.length > 24 ? 12 : nombrePlato.length > 16 ? 12 : 13;
+  return (
+    <Touchable style={[s.platoBtn, { width: ancho, backgroundColor: tintBg }, agotado && { opacity: 0.5, backgroundColor: C.border }]} disabled={agotado} onPress={onPress}>
+      <>
+        {pocoStock && (
+          <View style={s.stockBadge}>
+            <Feather name="alert-triangle" size={10} color={C.white} />
+            <Text style={s.stockBadgeText}>¡{stockVisible}!</Text>
+          </View>
+        )}
+        {cantEnCarrito > 0 && (
+          <View style={s.badgeComanda}>
+            <Text style={s.badgeComandaText}>{cantEnCarrito}</Text>
+          </View>
+        )}
+      </>
+      <View style={[s.platoBtnBar, { backgroundColor: agotado ? C.textMuted : color }]} />
+      <Text
+        style={[s.platoNombre, { fontSize: tamanoNombre, lineHeight: tamanoNombre + 4 }, agotado && { textDecorationLine: 'line-through', color: C.textMuted }]}
+        numberOfLines={3}
+      >{nombrePlato}</Text>
+      <Text style={[s.platoPrecio, { color: agotado ? C.textMuted : color }]}>
+        {agotado ? 'AGOTADO' : `${esDoble ? 'Desde ' : ''}S/ ${Number(plato?.precio || 0).toFixed(2)}`}
+      </Text>
+      {esDoble && !agotado && (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 4 }}>
+          <MaterialCommunityIcons name="silverware-fork-knife" size={11} color={C.textMuted} />
+          <Text style={{ fontSize: 10, fontWeight: '800', color: C.textMuted, textTransform: 'uppercase' }}>2 opciones</Text>
+        </View>
+      )}
+    </Touchable>
+  );
+};
 
 export default function App() {
 
@@ -146,6 +185,27 @@ export default function App() {
 
   const insets = useSafeAreaInsets();
   const elRestauranteEstaCerrado = appData.estadoRestaurante.cierreForzado === obtenerFechaActualLocal();
+  // 🥩 modo_solo_carta: si es true, el Menú del Día se oculta en toda la tablet
+  // (viene de Firestore contenido/configuracion sincronizado por el backend).
+  const modoSoloCarta = appData.estadoRestaurante?.modo_solo_carta === true;
+
+  // 🍽️ Carta agrupada: un plato con dos precios (personal/fuente, vaso/jarra) deja de ser
+  // DOS botones y se muestra como UNO con el nombre limpio. El ítem conserva su nombre con
+  // sufijo dentro de `_grupo`, así la caja sigue validando el precio, el stock y la receta.
+  const cartaAgrupada = agruparCartaCompleta(appData.carta);
+
+  // Al tocar un plato con dos precios se abre el modal para elegir la porción.
+  const abrirPlatoCarta = (grupo: any, catNombre: string) => {
+    if (grupo.items.length > 1) {
+      setUi((prev: any) => ({ ...prev, modalVariante: true, grupoVariante: { ...grupo, categoria: catNombre } }));
+      return;
+    }
+    agregarAlCarrito(grupo.items[0].plato, catNombre);
+  };
+
+  // 🏆 MÁS PEDIDOS: resuelvo el ranking del backend contra la carta actual (si un
+  // plato ya no está en la carta, no se muestra) y evito grupos repetidos.
+  const listaMasPedidos = resolverMasPedidos(cartaAgrupada, appData.masPedidos);
 
   // 🟢 Obtener configuración visual de una categoría
   const getCatConf = (nombre: string) => {
@@ -264,10 +324,13 @@ export default function App() {
           <ScrollView style={s.scrollBase} contentContainerStyle={{ padding: PADDING, paddingBottom: 40 }} contentInsetAdjustmentBehavior="automatic" refreshControl={<RefreshControl refreshing={admin.refreshing} onRefresh={onRefreshAdmin} tintColor={C.gold} />}>
             <Text style={s.seccionTitle}>ACCIONES ADMINISTRATIVAS</Text>
             <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 24}}>
-               <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.gold, flex: 1, minWidth: 100}]} onPress={abrirEditorMenu}>
-                  <Feather name="edit-3" size={22} color={C.gold} style={{marginBottom: 6}}/>
-                  <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>EDITAR MENÚ</Text>
-               </Touchable>
+               {/* 🥩 modo_solo_carta: el editor del Menú del Día se oculta */}
+               {!modoSoloCarta && (
+                 <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.gold, flex: 1, minWidth: 100}]} onPress={abrirEditorMenu}>
+                    <Feather name="edit-3" size={22} color={C.gold} style={{marginBottom: 6}}/>
+                    <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>EDITAR MENÚ</Text>
+                 </Touchable>
+               )}
                <Touchable style={[s.quickBtn, {backgroundColor: C.surface, borderColor: C.danger, flex: 1, minWidth: 100}]} onPress={() => setAdmin(prev => ({ ...prev, modalGasto: true }))}>
                   <Feather name="dollar-sign" size={22} color={C.danger} style={{marginBottom: 6}}/>
                   <Text style={{fontSize: 12, fontWeight: '800', color: C.textDark}}>NUEVO GASTO</Text>
@@ -1053,7 +1116,8 @@ export default function App() {
               </View>
             )}
 
-            {appData.carta.filter((c: any) => ['entradas', 'segundos'].includes(c.nombre.toLowerCase().trim())).map((cat: any) => {
+            {/* 🥩 modo_solo_carta: el Menú del Día (entradas/segundos) se oculta del catálogo */}
+            {!modoSoloCarta && appData.carta.filter((c: any) => ['entradas', 'segundos'].includes(c.nombre.toLowerCase().trim())).map((cat: any) => {
               if (appData.modoDomingo && cat.nombre.toLowerCase().trim() === 'entradas') return null;
               const items = cat.items.filter((p: any) => p.nombre.toLowerCase().includes(mozo.filtroCarta.toLowerCase()));
               if (items.length === 0) return null;
@@ -1119,7 +1183,43 @@ export default function App() {
               );
             })}
 
-            {appData.carta.filter((c: any) => c.nombre !== 'entradas' && c.nombre !== 'segundos').map((cat: any) => {
+            {/* 🏆 MÁS PEDIDOS: top de la carta según las ventas de los últimos 30 días.
+                Lo calcula el backend (/api/mas-pedidos) y aquí solo se resuelve contra
+                la carta actual. Se oculta mientras el mozo busca un plato. */}
+            {mozo.filtroCarta === '' && listaMasPedidos.length > 0 && (
+              <View style={s.seccionWrap}>
+                <View style={s.seccionHeader}>
+                  <View style={[s.catHeaderIcon, { backgroundColor: C.gold }]}>
+                    <MaterialCommunityIcons name="fire" size={16} color={C.white} />
+                  </View>
+                  <Text style={s.seccionHeaderTitle}>Más pedidos</Text>
+                  <View style={[s.seccionHeaderLine, { backgroundColor: C.gold }]} />
+                </View>
+                <View style={[s.platosGrid, { justifyContent: 'space-between' }]}>
+                  {listaMasPedidos.map(({ grupo, categoria, plato }: any) => {
+                    const catConfMp = getCatConf(categoria);
+                    const cantEnCarrito = carrito.filter(i => i.categoria === categoria && grupo.items.some((g: any) => g.plato.nombre === i.nombre)).reduce((acc, curr) => acc + curr.cantidad, 0);
+                    return (
+                      <PlatoCard
+                        key={`mp-${grupo.key}`}
+                        plato={plato}
+                        ancho={PLATO_CARD_WIDTH}
+                        color={catConfMp.color}
+                        tintBg={catConfMp.tintBg}
+                        esDoble={grupo.items.length > 1}
+                        agotado={plato._rango.agotado}
+                        stockVisible={plato._rango.stockMin}
+                        pocoStock={plato._rango.stockMin !== null && plato._rango.stockMin <= 3 && plato._rango.stockMin > 0}
+                        cantEnCarrito={cantEnCarrito}
+                        onPress={() => abrirPlatoCarta(grupo, categoria)}
+                      />
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {cartaAgrupada.filter((c: any) => c.nombre !== 'entradas' && c.nombre !== 'segundos').map((cat: any) => {
               const items = cat.items.filter((p: any) => p.nombre.toLowerCase().includes(mozo.filtroCarta.toLowerCase()));
               if (items.length === 0) return null;
               const catConf = getCatConf(cat.nombre);
@@ -1134,36 +1234,24 @@ export default function App() {
                   </View>
                   <View style={[s.platosGrid, { justifyContent: 'space-between' }]}>
                     {items.map((plato: any) => {
-                      const cantEnCarrito = carrito.filter(i => i.nombre === plato.nombre && i.categoria === cat.nombre).reduce((acc, curr) => acc + curr.cantidad, 0);
-                      const agotado = plato.stock_actual !== null && plato.stock_actual <= 0;
-                      const pocoStock = plato.stock_actual !== null && plato.stock_actual <= 3 && plato.stock_actual > 0;
-                      // 🟢 FIX RESPONSIVE: fuente dinámica para que el nombre del plato nunca se corte
-                      const nombrePlato = plato.nombre || '';
-                      const tamanoNombre = nombrePlato.length > 34 ? 11 : nombrePlato.length > 24 ? 12 : nombrePlato.length > 16 ? 12 : 13;
+                      // 🍽️ Un plato con dos precios es UN solo botón: nombre limpio y el modal
+                      // elige la porción. El carrito recibe el nombre CON sufijo (personal/fuente).
+                      const grupo = plato._grupo;
+                      const cantEnCarrito = carrito.filter(i => i.categoria === cat.nombre && grupo.items.some((g: any) => g.plato.nombre === i.nombre)).reduce((acc, curr) => acc + curr.cantidad, 0);
                       return (
-                        <Touchable key={plato.id || plato.nombre} style={[s.platoBtn, { width: PLATO_CARD_WIDTH, backgroundColor: catConf.tintBg }, agotado && { opacity: 0.5, backgroundColor: C.border }]} disabled={agotado} onPress={() => agregarAlCarrito(plato, cat.nombre)}>
-                          <>
-                            {pocoStock && (
-                              <View style={s.stockBadge}>
-                                <Feather name="alert-triangle" size={10} color={C.white} />
-                                <Text style={s.stockBadgeText}>¡{plato.stock_actual}!</Text>
-                              </View>
-                            )}
-                            {cantEnCarrito > 0 && (
-                              <View style={s.badgeComanda}>
-                                <Text style={s.badgeComandaText}>{cantEnCarrito}</Text>
-                              </View>
-                            )}
-                          </>
-                          <View style={[s.platoBtnBar, { backgroundColor: agotado ? C.textMuted : catConf.color }]} />
-                          <Text
-                            style={[s.platoNombre, { fontSize: tamanoNombre, lineHeight: tamanoNombre + 4 }, agotado && { textDecorationLine: 'line-through', color: C.textMuted }]}
-                            numberOfLines={3}
-                          >{nombrePlato}</Text>
-                          <Text style={[s.platoPrecio, { color: agotado ? C.textMuted : catConf.color }]}>
-                            {agotado ? 'AGOTADO' : `S/ ${plato.precio.toFixed(2)}`}
-                          </Text>
-                        </Touchable>
+                        <PlatoCard
+                          key={plato.id || plato.nombre}
+                          plato={plato}
+                          ancho={PLATO_CARD_WIDTH}
+                          color={catConf.color}
+                          tintBg={catConf.tintBg}
+                          esDoble={grupo.items.length > 1}
+                          agotado={plato._rango.agotado}
+                          stockVisible={plato._rango.stockMin}
+                          pocoStock={plato._rango.stockMin !== null && plato._rango.stockMin <= 3 && plato._rango.stockMin > 0}
+                          cantEnCarrito={cantEnCarrito}
+                          onPress={() => abrirPlatoCarta(grupo, cat.nombre)}
+                        />
                       );
                     })}
                   </View>
@@ -1334,6 +1422,46 @@ export default function App() {
                 <Touchable style={s.btnSecondary} onPress={() => setUi(prev => ({ ...prev, modalFueraCarta: false }))}><Text style={s.btnSecondaryText}>Cancelar</Text></Touchable>
               </View>
             </KeyboardAvoidingView>
+          </Modal>
+
+          {/* 🍽️ MODAL: ELEGIR PORCIÓN (PERSONAL / FUENTE · VASO / JARRA) */}
+          <Modal visible={ui.modalVariante} transparent animationType="fade" onRequestClose={() => setUi(prev => ({ ...prev, modalVariante: false }))}>
+            <View style={s.modalOverlay}>
+              <View style={s.modalCard}>
+                <Text style={s.modalTitle}>{ui.grupoVariante?.base || ''}</Text>
+                <Text style={s.modalSubtitle}>Elige la porción</Text>
+                {(ui.grupoVariante?.items || []).map((op: any, idx: number) => {
+                  const opAgotado = op.plato.stock_actual !== null && op.plato.stock_actual !== undefined && op.plato.stock_actual <= 0;
+                  return (
+                    <Touchable
+                      key={op.variante || idx}
+                      disabled={opAgotado}
+                      accessibilityLabel={`${etiquetaVariante(op.variante)} ${op.plato.nombre}`}
+                      accessibilityRole="button"
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                        backgroundColor: C.bg, borderRadius: 12, padding: 18, marginBottom: 10,
+                        borderWidth: 1, borderColor: opAgotado ? C.border : C.primary,
+                        opacity: opAgotado ? 0.5 : 1,
+                      }}
+                      onPress={() => {
+                        const categoria = ui.grupoVariante?.categoria;
+                        setUi(prev => ({ ...prev, modalVariante: false }));
+                        agregarAlCarrito(op.plato, categoria);
+                      }}
+                    >
+                      <Text style={{ fontSize: 16, fontWeight: '800', color: C.textDark, textTransform: 'uppercase' }}>
+                        {etiquetaVariante(op.variante)}
+                      </Text>
+                      <Text style={{ fontSize: 16, fontWeight: '800', color: opAgotado ? C.textMuted : C.primary }}>
+                        {opAgotado ? 'AGOTADO' : `S/ ${op.plato.precio.toFixed(2)}`}
+                      </Text>
+                    </Touchable>
+                  );
+                })}
+                <Touchable style={s.btnSecondary} onPress={() => setUi(prev => ({ ...prev, modalVariante: false }))}><Text style={s.btnSecondaryText}>Cancelar</Text></Touchable>
+              </View>
+            </View>
           </Modal>
         </>
       )}

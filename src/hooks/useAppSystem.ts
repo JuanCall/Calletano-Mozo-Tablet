@@ -18,8 +18,10 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
   const [loginRole, setLoginRole] = useState<'dueno' | 'mozo' | null>(null);
   
   const [appData, setAppData] = useState({
-    mesas: [], carta: [], modoDomingo: false,    estadoRestaurante: {apertura: 12, cierre: 22, cierreForzado: '', mesImpuestoPagado: ''},
-    extrasStock: {} as Record<string, number>
+    mesas: [], carta: [], modoDomingo: false,    estadoRestaurante: {apertura: 12, cierre: 22, cierreForzado: '', mesImpuestoPagado: '', modo_solo_carta: false},
+    extrasStock: {} as Record<string, number>,
+    // 🏆 Ranking "más pedidos" de la carta (lo calcula el backend en /api/mas-pedidos).
+    masPedidos: [] as any[]
   });
 
   const socketRef = useRef<Socket | null>(null);
@@ -51,13 +53,16 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
           axios.get(`${API_URL}/api/extras-stock`, { timeout: 4000 })
         ]);
         
-        setAppData({
+        // Uso la forma funcional para no pisar campos que se cargan por separado
+        // (por ejemplo masPedidos, que se refresca cada 15 minutos).
+        setAppData(prev => ({
+          ...prev,
           mesas: resMesas.data,
           carta: resCarta.data,
           modoDomingo: resDom.data.modoDomingo,
-          estadoRestaurante: resDom.data.estadoRestaurante || {apertura: 12, cierre: 22, cierreForzado: ''},
+          estadoRestaurante: resDom.data.estadoRestaurante || {apertura: 12, cierre: 22, cierreForzado: '', modo_solo_carta: false},
           extrasStock: resExtras.data || {}
-        });
+        }));
         setSys(prev => ({ ...prev, serverStatus: 'Conectado', conectado: true }));
       } catch {
         setSys(prev => ({ ...prev, serverStatus: 'Error · Revisa IP', conectado: false }));
@@ -85,6 +90,28 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sys.ipServidor, sys.modoConfig, authData.usuarioActivo]);
+
+  // 🏆 MÁS PEDIDOS: a diferencia de las mesas (que se refrescan en cada actualización
+  // de pedidos), el ranking de ventas cambia lento. Lo cargo aparte y lo reviso cada
+  // 15 minutos; el backend además lo tiene en cache.
+  useEffect(() => {
+    if (!sys.ipServidor || sys.modoConfig) return;
+    const API_URL = `https://${sys.ipServidor}:3001`;
+    let cancelado = false;
+
+    const cargarMasPedidos = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/api/mas-pedidos`, { timeout: 6000 });
+        if (!cancelado) setAppData(prev => ({ ...prev, masPedidos: res.data?.items || [] }));
+      } catch {
+        // El ranking es opcional: si falla, la sección simplemente no se muestra.
+      }
+    };
+
+    cargarMasPedidos();
+    const timer = setInterval(cargarMasPedidos, 15 * 60 * 1000);
+    return () => { cancelado = true; clearInterval(timer); };
+  }, [sys.ipServidor, sys.modoConfig]);
 
   const guardarIP = async () => {
     const ipLimpia = sys.ipInput.trim();
