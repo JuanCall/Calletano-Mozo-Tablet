@@ -18,7 +18,11 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.juanoffx.mozotablet"
+      "package": "com.juanoffx.mozotablet",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "output": "static",
@@ -41,8 +45,18 @@
       "./plugins/with-network-security-config",
       "expo-font",
       "expo-dev-client",
-      ["expo-camera", { "cameraPermission": "Permitir a Calletano usar la cámara para escanear el QR del Club de clientes." }],
-      ["expo-navigation-bar", { "hidden": true }]
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Permitir a Calletano usar la cámara para escanear el QR del Club de clientes."
+        }
+      ],
+      [
+        "expo-navigation-bar",
+        {
+          "hidden": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
@@ -50,8 +64,12 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "3e450401-f1da-4f3a-8e32-2968ecf1f644"
+        "projectId": "714a207d-ebeb-4389-b9f4-bf8f39f9664e"
+      },
+      "expo-navigation-bar": {
+        "hidden": true
       }
-    }
+    },
+    "owner": "juanoffx"
   }
 }

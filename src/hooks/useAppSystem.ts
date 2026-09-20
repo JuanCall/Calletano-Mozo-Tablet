@@ -8,11 +8,26 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase-config';
 import { CLUB_API_KEY } from '../lib/apiClient';
 import { obtenerFechaActualLocal } from '../utils/helpers';
+import {
+  Diagnostico,
+  diagnosticoDeCausa,
+  interpretarError,
+  limpiarIp,
+} from '../utils/diagnostico';
 
+type SysState = {
+  ipServidor: string;
+  ipInput: string;
+  modoConfig: boolean;
+  serverStatus: string;
+  conectado: boolean;
+  /** 🩺 Último fallo de conexión, ya explicado (IP / certificado / token). */
+  diagnostico: Diagnostico | null;
+};
 
 export default function useAppSystem(onAdminLoginSuccess: () => void) {
-  const [sys, setSys] = useState({ ipServidor: '', ipInput: '', modoConfig: true, serverStatus: 'Sin conexión', conectado: false });
-  const [authData, setAuthData] = useState({ usuarioActivo: null as any, username: '', password: '', error: '' });
+  const [sys, setSys] = useState<SysState>({ ipServidor: '', ipInput: '', modoConfig: true, serverStatus: 'Sin conexión', conectado: false, diagnostico: null });
+  const [authData, setAuthData] = useState({ usuarioActivo: null as any, username: '', password: '', error: '', errorDetalle: null as Diagnostico | null });
   
   // 🆕 Login con roles: 'dueno' | 'mozo' | null
   const [loginRole, setLoginRole] = useState<'dueno' | 'mozo' | null>(null);
@@ -25,6 +40,27 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
   });
 
   const socketRef = useRef<Socket | null>(null);
+
+  // 🩺 Traduce un fallo de conexión en un mensaje concreto: IP equivocada,
+  // certificado rechazado o tablet sin autorizar. El backend expone
+  // GET /api/status SIN token — esa sonda separa la capa de red/TLS de la de
+  // autorización, que era justo lo que antes quedaba todo bajo "Revisa IP".
+  const diagnosticarConexion = async (API_URL: string, errorOriginal: any): Promise<Diagnostico> => {
+    const ip = sys.ipServidor;
+
+    // 1) Si la Caja alcanzó a responder, la red y el certificado están bien:
+    //    el fallo es de autorización (401) o un error de la propia Caja.
+    if (errorOriginal?.response) return interpretarError(errorOriginal, ip);
+
+    // 2) Sin respuesta: sonda pública para saber si contestó alguien.
+    try {
+      await axios.get(`${API_URL}/api/status`, { timeout: 4000 });
+      // Responde bien sin token → el fallo anterior fue momentáneo.
+      return diagnosticoDeCausa('desconocido', { ip });
+    } catch (errorSonda) {
+      return interpretarError(errorSonda, ip);
+    }
+  };
 
   useEffect(() => {
     AsyncStorage.getItem('pos_ip').then(ip => {
@@ -63,9 +99,10 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
           estadoRestaurante: resDom.data.estadoRestaurante || {apertura: 12, cierre: 22, cierreForzado: '', modo_solo_carta: false},
           extrasStock: resExtras.data || {}
         }));
-        setSys(prev => ({ ...prev, serverStatus: 'Conectado', conectado: true }));
-      } catch {
-        setSys(prev => ({ ...prev, serverStatus: 'Error · Revisa IP', conectado: false }));
+        setSys(prev => ({ ...prev, serverStatus: 'Conectado', conectado: true, diagnostico: null }));
+      } catch (error) {
+        const diagnostico = await diagnosticarConexion(API_URL, error);
+        setSys(prev => ({ ...prev, serverStatus: diagnostico.estadoCorto, conectado: false, diagnostico }));
       }
     };
 
@@ -114,7 +151,7 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
   }, [sys.ipServidor, sys.modoConfig]);
 
   const guardarIP = async () => {
-    const ipLimpia = sys.ipInput.trim();
+    const ipLimpia = limpiarIp(sys.ipInput);
     if (!ipLimpia) return Alert.alert('Error', 'Ingresa una IP válida');
     await AsyncStorage.setItem('pos_ip', ipLimpia);
     setSys(prev => ({ ...prev, ipServidor: ipLimpia, modoConfig: false }));
@@ -135,7 +172,8 @@ export default function useAppSystem(onAdminLoginSuccess: () => void) {
       // Forzar rol como mozo siempre
       setAuthData(prev => ({ ...prev, usuarioActivo: { username: 'Mozo', rol: 'mozo' } }));
     } catch (e: any) {
-      setAuthData(prev => ({ ...prev, error: 'No se pudo conectar. Revisa la IP de la Caja.' }));
+      const diagnostico = await diagnosticarConexion(`https://${sys.ipServidor}:3001`, e);
+      setAuthData(prev => ({ ...prev, error: diagnostico.titulo, errorDetalle: diagnostico }));
     }
   };
 

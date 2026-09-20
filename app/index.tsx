@@ -19,6 +19,7 @@ import useMozo from '../src/hooks/useMozo';
 import useClub, { CONSUMO_MINIMO } from '../src/hooks/useClub';
 import useClubAdmin from '../src/hooks/useClubAdmin';
 import { calcularProgreso, enmascararDocumento } from '../src/utils/club';
+import { etiquetaCausa } from '../src/utils/diagnostico';
 
 // ─── COMPONENTES PUROS EXTRAÍDOS ───
 const ModIcon = ({ mod, color }: { mod: string, color: string }) => {
@@ -253,8 +254,22 @@ export default function App() {
               <Text style={s.cfgLogoSub}>SISTEMA DE CONTROL</Text>
             </View>
             
+            {/* 🩺 Diagnóstico de conexión: dice QUÉ falló (IP, certificado o clave)
+                en vez del genérico "Revisa la IP". */}
             {authData.error !== '' && (
-              <Text style={{color: C.danger, textAlign: 'center', marginBottom: 15, fontWeight: '800', fontSize: 13}}>{authData.error}</Text>
+              authData.errorDetalle ? (
+                <View style={{ backgroundColor: C.dangerSoft, borderRadius: 14, padding: 14, marginBottom: 18, borderWidth: 1, borderColor: 'rgba(215, 38, 61, 0.25)' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                    <Feather name="alert-triangle" size={14} color={C.danger} />
+                    <Text style={{ color: C.danger, fontWeight: '800', fontSize: 13, marginLeft: 6, flex: 1 }}>{authData.errorDetalle.titulo}</Text>
+                  </View>
+                  <Text style={{ color: C.textDark, fontSize: 12, lineHeight: 17 }}>{authData.errorDetalle.detalle}</Text>
+                  <Text style={{ color: C.textMuted, fontSize: 12, lineHeight: 17, marginTop: 6 }}>👉 {authData.errorDetalle.sugerencia}</Text>
+                  <Text style={{ color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 0.8, marginTop: 10 }}>CAUSA: {etiquetaCausa(authData.errorDetalle.causa)}</Text>
+                </View>
+              ) : (
+                <Text style={{color: C.danger, textAlign: 'center', marginBottom: 15, fontWeight: '800', fontSize: 13}}>{authData.error}</Text>
+              )
             )}
 
             {/* 🆕 SELECCIONADOR DE ROL */}
@@ -1532,7 +1547,7 @@ export default function App() {
               </>
             )}
             {appData.mesas.length === 0 && sys.conectado && !elRestauranteEstaCerrado && <Text style={s.emptyText}>No hay mesas configuradas.</Text>}
-            {!sys.conectado && <Text style={s.emptyText}>Sin conexión · Verifica la IP en Ajustes</Text>}
+            {!sys.conectado && <Text style={s.emptyText}>{sys.diagnostico ? `${sys.diagnostico.titulo}. ${sys.diagnostico.sugerencia}` : 'Sin conexión · Verifica la IP en Ajustes'}</Text>}
           </ScrollView>
         </>
       )}
